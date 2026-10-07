@@ -1,0 +1,10 @@
+node_modules/
+.pnpm-store/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+coverage/
+.postgres-data/

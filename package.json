@@ -1,0 +1,30 @@
+{
+  "name": "precificacao-por-custos",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "migrate": "node scripts/migrate.mjs",
+    "build": "node scripts/build.mjs",
+    "lint": "node scripts/lint.mjs",
+    "focus:check": "node scripts/check-focus-nfe.mjs",
+    "gemini:check": "node scripts/check-gemini.mjs",
+    "gemini:evaluate": "node scripts/evaluate-gemini-assistant.mjs",
+    "gemini:probe": "node scripts/probe-gemini-payload.mjs",
+    "searchapi:check": "node scripts/check-searchapi.mjs",
+    "test": "node --test --test-isolation=none"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^10.0.0",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.0.1",
+    "express-session": "^1.18.1",
+    "helmet": "^8.1.0",
+    "pg": "^8.16.3",
+    "zod": "^3.24.4"
+  }
+}

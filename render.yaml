@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: assistente-precificacao
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    preDeployCommand: npm run migrate
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 20
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: assistente-precificacao-db
+          property: connectionString
+      - key: FOCUS_NFE_BASE_URL
+        value: https://api.focusnfe.com.br
+      - key: FOCUS_NFE_TIMEOUT_MS
+        value: "5000"
+      - key: FOCUS_NFE_TOKEN
+        sync: false
+      - key: SEARCHAPI_API_KEY
+        sync: false
+      - key: SEARCHAPI_TIMEOUT_MS
+        value: "15000"
+      - key: GEMINI_API_KEY
+        # Cadastre em Environment no Web Service; sync:false não injeta segredo em serviço existente.
+        sync: false
+      - key: AI_PROVIDER
+        value: gemini
+      - key: AI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: AI_FILL_MODE
+        value: complete
+      - key: AI_TIMEOUT_MS
+        value: "25000"
+databases:
+  - name: assistente-precificacao-db
+    plan: free
+    databaseName: assistente_precificacao
+    user: assistente_precificacao
+    postgresMajorVersion: "18"

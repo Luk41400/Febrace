@@ -1,0 +1,533 @@
+import "dotenv/config";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import express from "express";
+import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
+import { rateLimit } from "express-rate-limit";
+import { getConfig, getFocusNfeConfig, getSearchApiConfig, getAiAssistantConfig, aiAssistantHealth, deploymentHealth, marketHealth } from "./lib/config.js";
+import { createAiFormProvider } from "./lib/ai-form-assistant.js";
+import { createAiPricingRouter, handleAiRequestError } from "./lib/ai-pricing-route.js";
+import { pool, verifyDatabase } from "./lib/database.js";
+import { runMarketSearch } from "./lib/market-search.js";
+import { createSearchApiMarketProvider, searchApiErrorForClient, SearchApiError, redactSearchApiSensitiveData } from "./lib/searchapi-market-provider.js";
+import { createFocusNFeClient, focusNFeErrorForClient, FocusNFeError, redactFocusNFeSensitiveData } from "./lib/focus-nfe-client.js";
+import { createIbptTaxProvider, ibptErrorForClient, IbptTaxError } from "./lib/ibpt-tax-provider.js";
+import { searchFiscalNcms, confirmFiscalNcm, hasRelevantFiscalConfirmation } from "./lib/fiscal-classification.js";
+import { productForClient, userForClient } from "./lib/models.js";
+import { hashPassword, verifyPasswordForLogin } from "./lib/passwords.js";
+import { changeOwnPasswordAndRevokeSessions, findOwnProfile, profileAccountErrorForClient, ProfileAccountError, updateOwnProfile } from "./lib/profile-account.js";
+import { authoritativeProductSnapshot } from "./lib/pricing-persistence.js";
+import { createSecurityHeaders, requireSameOriginForWrites } from "./lib/request-security.js";
+import { changePasswordSchema, loginSchema, marketSearchSchema, ncmSearchSchema, productCreateSchema, productIdSchema, productListSchema, productMetadataSchema, profileUpdateSchema, registerSchema, taxEstimateSchema, validate } from "./lib/validation.js";
+
+const projectRoot = dirname(fileURLToPath(import.meta.url));
+const config = getConfig();
+const focusNfeConfig = getFocusNfeConfig();
+const focusNfeClient = focusNfeConfig.isConfigured ? createFocusNFeClient(focusNfeConfig) : null;
+const taxProvider = createIbptTaxProvider({ filePath: resolve(projectRoot, "data", "ibpt", "TabelaIBPTaxSP26.2.A.csv") });
+const searchApiConfig = getSearchApiConfig();
+const marketProvider = searchApiConfig.isConfigured ? createSearchApiMarketProvider(searchApiConfig) : null;
+const aiConfig = getAiAssistantConfig();
+const aiProvider = createAiFormProvider(aiConfig);
+const app = express();
+const PgSession = connectPgSimple(session);
+
+console.info("[AI] Configuration", aiAssistantHealth(aiConfig));
+console.info("[Deploy] Configuration", deploymentHealth());
+
+console.info(`[Fiscal/NCM] provider=FocusNFe configured=${focusNfeConfig.isConfigured} environment=${focusNfeConfig.environment}`);
+console.info("[Market] Provider: SearchAPI Google Shopping");
+console.info(`[Market] Configured: ${searchApiConfig.isConfigured}`);
+if (!searchApiConfig.isConfigured) {
+  console.warn(`[Market] Missing environment variables: ${searchApiConfig.missingEnvironmentVariables.join(", ")}`);
+}
+
+app.disable("x-powered-by");
+// Render terminates HTTPS before forwarding the request. Express must trust that
+// single proxy hop before it is allowed to issue a Secure session cookie.
+if (config.secureCookie) app.set("trust proxy", 1);
+console.info(`[Session] store=PostgreSQL secure=${config.secureCookie} sameSite=lax trustProxy=${config.secureCookie}`);
+
+app.use(createSecurityHeaders());
+app.use(requireSameOriginForWrites);
+app.use(express.json({ limit: "100kb" }));
+app.use((req, res, next) => {
+  if (req.path.startsWith("/auth") || req.path.startsWith("/products") || req.path.startsWith("/fiscal") || req.path.startsWith("/market") || req.path.startsWith("/tax") || req.path.startsWith("/diagnostics")) {
+    res.set("Cache-Control", "no-store");
+  }
+  next();
+});
+app.use(
+  session({
+    name: "pricing.sid",
+    store: new PgSession({ pool, tableName: "user_sessions", createTableIfMissing: false }),
+    secret: config.sessionSecret,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      sameSite: "lax",
+      secure: config.secureCookie,
+    },
+  }),
+);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 15,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Muitas tentativas. Aguarde alguns minutos antes de tentar novamente." },
+});
+
+const fiscalLookupLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Muitas consultas fiscais. Aguarde um minuto e tente novamente." },
+});
+
+const marketSearchLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Muitas consultas de mercado. Aguarde um minuto e tente novamente.", code: "MARKET_RATE_LIMITED" },
+});
+
+const marketRefreshLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 6,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Muitas atualizações de mercado. Aguarde um minuto e tente novamente.", code: "MARKET_RATE_LIMITED" },
+});
+
+function limitMarketRefresh(req, res, next) {
+  if (req.query.refresh !== "1") return next();
+  return marketRefreshLimiter(req, res, next);
+}
+
+const taxCalculationLimiter = rateLimit({
+  windowMs: 60 * 1_000,
+  limit: 15,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Muitos cálculos tributários. Aguarde um minuto e tente novamente.", code: "TAX_RATE_LIMITED" },
+});
+
+function sessionRegenerate(req) {
+  return new Promise((resolvePromise, reject) => req.session.regenerate((error) => (error ? reject(error) : resolvePromise())));
+}
+
+function sessionSave(req) {
+  return new Promise((resolvePromise, reject) => req.session.save((error) => (error ? reject(error) : resolvePromise())));
+}
+
+async function authenticateSession(req, user) {
+  await sessionRegenerate(req);
+  req.session.userId = user.id;
+  await sessionSave(req);
+}
+
+function authenticatedPayload(user) {
+  return { user: userForClient(user), taxEstimate: taxProvider.health() };
+}
+
+async function currentUser(req) {
+  if (!req.session.userId) return null;
+  const { rows } = await pool.query("SELECT id, name, email, created_at, updated_at FROM users WHERE id = $1", [req.session.userId]);
+  return rows[0] || null;
+}
+
+function sessionRequired(req, res) {
+  if (req.path.startsWith("/fiscal/ncms")) {
+    console.info("[Fiscal/NCM] userAuthenticated=false provider=FocusNFe upstreamStatus=not_called reason=SESSION_REQUIRED");
+  }
+  if (req.path === "/tax/estimate") {
+    console.info(`[TaxEstimate] userAuthenticated=false provider=IBPT configured=${taxProvider.metadata.configured} reason=SESSION_REQUIRED`);
+  }
+  console.info(`[Auth] ${req.method} ${req.path} authenticated=false`);
+  return res.status(401).json({ error: "Sua sessão expirou. Entre novamente.", code: "SESSION_REQUIRED" });
+}
+
+async function requireAuth(req, res, next) {
+  try {
+    const user = await currentUser(req);
+    if (!user) return sessionRequired(req, res);
+    req.user = user;
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+}
+
+function productColumns(includeCalculation = true) {
+  const calculation = includeCalculation ? ", calculation_data" : "";
+  return `id, name, description, category, cost_price, additional_costs, profit_margin, suggested_price, marketplace, consultation_date, created_at, updated_at${calculation}`;
+}
+
+const registrationAcceptedPayload = Object.freeze({
+  message: "Se os dados puderem ser usados, a conta estará pronta. Entre para continuar.",
+});
+
+function registrationAccepted(res) {
+  return res.status(202).json(registrationAcceptedPayload);
+}
+
+app.post("/auth/register", authLimiter, async (req, res, next) => {
+  try {
+    const input = validate(registerSchema, req.body);
+    const passwordHash = await hashPassword(input.password);
+    await pool.query(
+      "INSERT INTO users (id, name, email, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, name, email, created_at, updated_at",
+      [randomUUID(), input.name, input.email, passwordHash],
+    );
+    console.info("[Auth] accountCreated=true");
+    return registrationAccepted(res);
+  } catch (error) {
+    if (error.code === "23505") return registrationAccepted(res);
+    return next(error);
+  }
+});
+
+app.post("/auth/login", authLimiter, async (req, res, next) => {
+  try {
+    const input = validate(loginSchema, req.body);
+    const { rows } = await pool.query("SELECT id, name, email, password_hash, created_at, updated_at FROM users WHERE email = $1", [input.email]);
+    const user = rows[0];
+    const validPassword = await verifyPasswordForLogin(input.password, user?.password_hash);
+    if (!user || !validPassword) return res.status(401).json({ error: "E-mail ou senha inválidos." });
+
+    await authenticateSession(req, user);
+    return res.json(authenticatedPayload(user));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/auth/logout", async (req, res, next) => {
+  try {
+    if (!req.session) return res.status(204).end();
+    await new Promise((resolvePromise, reject) => req.session.destroy((error) => (error ? reject(error) : resolvePromise())));
+    res.clearCookie("pricing.sid");
+    return res.status(204).end();
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/auth/me", async (req, res, next) => {
+  try {
+    const user = req.session.userId ? await findOwnProfile(pool, req.session.userId) : null;
+    if (!user) {
+      console.info("[Auth] /auth/me authenticated=false");
+      return res.status(401).json({ error: "Sua sessão expirou. Entre novamente.", code: "SESSION_REQUIRED" });
+    }
+    console.info("[Auth] /auth/me authenticated=true");
+    return res.json(authenticatedPayload(user));
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.patch("/auth/me", requireAuth, async (req, res, next) => {
+  try {
+    const input = validate(profileUpdateSchema, req.body, { code: "PROFILE_VALIDATION_ERROR" });
+    const user = await updateOwnProfile(pool, req.user.id, input);
+    if (!user) return sessionRequired(req, res);
+    return res.json({ user: userForClient(user) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/auth/change-password", requireAuth, authLimiter, async (req, res, next) => {
+  try {
+    const input = validate(changePasswordSchema, req.body, { code: "PASSWORD_VALIDATION_ERROR" });
+    await changeOwnPasswordAndRevokeSessions(pool, req.user.id, input);
+    await authenticateSession(req, req.user);
+    return res.status(204).end();
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/health", async (req, res, next) => {
+  try {
+    await pool.query("SELECT 1");
+    return res.json({
+      status: "ok",
+      database: "connected",
+      fiscal: {
+        configured: focusNfeConfig.isConfigured,
+        environment: focusNfeConfig.environment,
+        provider: "FocusNFe",
+      },
+      market: marketHealth(searchApiConfig),
+      ai: aiAssistantHealth(aiConfig),
+      deployment: deploymentHealth(),
+      taxEstimate: taxProvider.health(),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/market/search", requireAuth, marketSearchLimiter, limitMarketRefresh, async (req, res, next) => {
+  try {
+    const { q, refresh } = validate(marketSearchSchema, req.query, { code: "INVALID_MARKET_QUERY" });
+    const result = await runMarketSearch({ provider: marketProvider, config: searchApiConfig, query: q, refresh: refresh === "1" });
+    return res.json(result);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.use("/ai", createAiPricingRouter({ requireAuth, provider: aiProvider }));
+
+app.get("/fiscal/ncms/search", requireAuth, fiscalLookupLimiter, async (req, res, next) => {
+  try {
+    const input = validate(ncmSearchSchema, req.query, { code: "INVALID_NCM_QUERY" });
+    if (!focusNfeClient) {
+      throw new FocusNFeError("A consulta fiscal ainda não foi configurada neste ambiente.", {
+        code: "FOCUS_NFE_NOT_CONFIGURED",
+        status: 503,
+      });
+    }
+    delete req.session.confirmedNcm;
+    delete req.session.fiscalNcmConfirmation;
+    delete req.session.fiscalNcmSearch;
+    await sessionSave(req);
+    const result = await searchFiscalNcms(focusNfeClient, input, { secrets: [focusNfeConfig.token] });
+    const classificationId = randomUUID();
+    req.session.fiscalNcmSearch = { ...result, classificationId };
+    await sessionSave(req);
+    return res.json({ ...result, classificationId });
+  } catch (error) {
+    if (error instanceof FocusNFeError) {
+      console.info(`[Fiscal/NCM] userAuthenticated=true provider=FocusNFe upstreamStatus=${error.upstreamStatus ?? "not_called"} code=${error.code} route=search`);
+    }
+    return next(error);
+  }
+});
+
+app.get("/fiscal/ncms/:codigo", requireAuth, fiscalLookupLimiter, async (req, res, next) => {
+  try {
+    const normalizedCode = String(req.params.codigo || "");
+    if (!focusNfeClient) {
+      throw new FocusNFeError("A consulta fiscal ainda não foi configurada neste ambiente.", {
+        code: "FOCUS_NFE_NOT_CONFIGURED",
+        status: 503,
+      });
+    }
+
+    console.info("[Fiscal/NCM] userAuthenticated=true provider=FocusNFe upstreamStatus=pending route=validate");
+    const { ncm, confirmation } = await confirmFiscalNcm(focusNfeClient, req.session.fiscalNcmSearch, normalizedCode, req.query.classificationId);
+    req.session.confirmedNcm = ncm.codigo;
+    req.session.fiscalNcmConfirmation = confirmation;
+    await sessionSave(req);
+    console.info("[Fiscal/NCM] userAuthenticated=true provider=FocusNFe upstreamStatus=200 route=validate");
+    return res.json({
+      ncm,
+      classificationId: confirmation.classificationId,
+      originalQuery: confirmation.originalQuery,
+      normalizedQuery: confirmation.normalizedQuery,
+      source: "Focus NFe",
+      environment: focusNfeConfig.environment === "production" ? "produção" : "homologação",
+      taxCalculationAvailable: false,
+    });
+  } catch (error) {
+    if (error instanceof FocusNFeError) {
+      console.info(`[Fiscal/NCM] userAuthenticated=true provider=FocusNFe upstreamStatus=${error.upstreamStatus ?? "not_called"} code=${error.code} route=validate`);
+    }
+    return next(error);
+  }
+});
+
+app.post("/tax/estimate", requireAuth, taxCalculationLimiter, async (req, res, next) => {
+  try {
+    const parsed = taxEstimateSchema.safeParse(req.body);
+    const ncmValid = typeof req.body?.ncm === "string" && /^\d{8}$/.test(req.body.ncm);
+    const ncmConfirmed = ncmValid && hasRelevantFiscalConfirmation(req.body, req.session);
+    const productOrigin = ["nacional", "importado"].includes(req.body?.productOrigin) ? req.body.productOrigin : "missing_or_invalid";
+    const priceValid = Number.isFinite(req.body?.unitValue) && req.body.unitValue > 0;
+    console.info("[TaxEstimate] requested=true");
+    console.info(`[TaxEstimate] configured=${taxProvider.metadata.configured}`);
+    console.info(`[TaxEstimate] ncmConfirmed=${ncmConfirmed}`);
+    console.info(`[TaxEstimate] ncmValid=${ncmValid}`);
+    console.info(`[TaxEstimate] productOrigin=${productOrigin}`);
+    console.info(`[TaxEstimate] priceValid=${priceValid}`);
+    const fieldMessages = {
+      ncm: "NCM necessário: confirme um código com 8 dígitos, sem espaços ou outros caracteres.",
+      productOrigin: "Selecione a origem do produto.",
+      unitValue: "Informe um maior preço válido e positivo.",
+      classificationId: "Confirme a classificação fiscal atual.",
+      originalQuery: "Informe o produto para classificação fiscal.",
+      normalizedQuery: "Informe a categoria para classificação fiscal.",
+    };
+    const issues = parsed.success ? [] : parsed.error.issues.map((issue) => fieldMessages[issue.path[0]] || "Revise os dados fiscais.");
+    const ncmMissing = !/^\d{8}$/.test(req.body?.ncm || "");
+    if (!ncmConfirmed && !ncmMissing) issues.push("Confirme o NCM para estimar os tributos.");
+    const confirmationCode = "FOCUS_NFE_NCM_CONFIRMATION_REQUIRED";
+    if (issues.length) {
+      console.info("[TaxEstimate] calculationStarted=false");
+      throw new IbptTaxError([...new Set(issues)].join(" "), {
+        code: ncmMissing ? "NCM_REQUIRED"
+          : req.body?.productOrigin === undefined || req.body?.productOrigin === "" ? "PRODUCT_ORIGIN_REQUIRED"
+          : !parsed.success ? "INVALID_TAX_CONTEXT" : confirmationCode,
+        status: 400,
+      });
+    }
+    const input = parsed.data;
+    const calculation = taxProvider.calculate(input);
+    console.info(`[TaxEstimate] calculated=true version=${calculation.version}`);
+    return res.json({ calculation });
+  } catch (error) {
+    console.info(`[TaxEstimate] provider=IBPT code=${error.code || "UNKNOWN"}`);
+    return next(error);
+  }
+});
+
+app.get("/products", requireAuth, async (req, res, next) => {
+  try {
+    const { search, sort, limit } = validate(productListSchema, req.query);
+    const direction = sort === "asc" ? "ASC" : "DESC";
+    const { rows } = await pool.query(
+      `SELECT ${productColumns()} FROM products
+       WHERE user_id = $1 AND name ILIKE $2
+       ORDER BY consultation_date ${direction}, created_at ${direction}
+       LIMIT $3`,
+      [req.user.id, `%${search}%`, limit],
+    );
+    return res.json({ products: rows.map((row) => productForClient(row)) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get("/products/:id", requireAuth, async (req, res, next) => {
+  try {
+    const { id } = validate(productIdSchema, req.params);
+    const { rows } = await pool.query(`SELECT ${productColumns()} FROM products WHERE id = $1 AND user_id = $2`, [id, req.user.id]);
+    if (!rows[0]) return res.status(404).json({ error: "Produto não encontrado." });
+    return res.json({ product: productForClient(rows[0]) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/products", requireAuth, async (req, res, next) => {
+  try {
+    const request = validate(productCreateSchema, req.body);
+    const input = authoritativeProductSnapshot(request);
+    const { rows } = await pool.query(
+      `INSERT INTO products (
+        id, user_id, name, description, category, cost_price, additional_costs, profit_margin,
+        suggested_price, marketplace, consultation_date, calculation_data
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11::timestamptz, NOW()), $12::jsonb)
+      RETURNING ${productColumns()}`,
+      [
+        randomUUID(), req.user.id, input.name, input.description, input.category, input.costPrice,
+        input.additionalCosts, input.profitMargin, input.suggestedPrice, input.marketplace,
+        null, JSON.stringify(input.calculationData),
+      ],
+    );
+    return res.status(201).json({ product: productForClient(rows[0]) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.patch("/products/:id", requireAuth, async (req, res, next) => {
+  try {
+    const { id } = validate(productIdSchema, req.params);
+    const input = validate(productMetadataSchema, req.body);
+    const { rows } = await pool.query(
+      `UPDATE products SET
+        name = $3, description = $4, category = $5
+       WHERE id = $1 AND user_id = $2
+       RETURNING ${productColumns()}`,
+      [
+        id, req.user.id, input.name, input.description, input.category,
+      ],
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Produto não encontrado." });
+    return res.json({ product: productForClient(rows[0]) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.delete("/products/:id", requireAuth, async (req, res, next) => {
+  try {
+    const { id } = validate(productIdSchema, req.params);
+    const { rowCount } = await pool.query("DELETE FROM products WHERE id = $1 AND user_id = $2", [id, req.user.id]);
+    if (!rowCount) return res.status(404).json({ error: "Produto não encontrado." });
+    return res.status(204).end();
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get(["/", "/index.html"], (req, res) => res.sendFile(resolve(projectRoot, "index.html")));
+app.get("/styles.css", (req, res) => res.sendFile(resolve(projectRoot, "styles.css")));
+app.get("/ai-assistant.css", (req, res) => res.sendFile(resolve(projectRoot, "ai-assistant.css")));
+app.get("/favicon.svg", (req, res) => res.sendFile(resolve(projectRoot, "favicon.svg")));
+app.get("/theme-init.js", (req, res) => res.sendFile(resolve(projectRoot, "theme-init.js")));
+app.get("/file-protocol-redirect.js", (req, res) => res.sendFile(resolve(projectRoot, "file-protocol-redirect.js")));
+app.get("/app.js", (req, res) => res.sendFile(resolve(projectRoot, "app.js")));
+
+function isDatabaseError(error) {
+  return ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "28P01", "3D000", "57P01", "MIGRATIONS_PENDING"].includes(error.code);
+}
+
+app.use("/ai", handleAiRequestError);
+
+app.use((error, req, res, next) => {
+  const safeLogMessage = error instanceof FocusNFeError
+    ? redactFocusNFeSensitiveData(error.message, [focusNfeConfig.token])
+    : error instanceof SearchApiError
+      ? redactSearchApiSensitiveData(error.message, [searchApiConfig.apiKey])
+      : "details omitted";
+  console.error(`[api] ${req.method} ${req.path} falhou (${error.code || "UNKNOWN"}):`, safeLogMessage);
+  if (res.headersSent) return next(error);
+  const status = isDatabaseError(error) ? 503 : error.status || 500;
+  const message =
+    status === 503
+      ? "Não foi possível conectar ao banco de dados. Tente novamente mais tarde."
+      : status >= 500 && req.path === "/auth/register"
+        ? "Não foi possível criar sua conta. Tente novamente."
+        : status >= 500
+          ? "Não foi possível concluir a operação. Tente novamente em instantes."
+          : error.message;
+  const payload = error instanceof ProfileAccountError
+    ? profileAccountErrorForClient(error)
+    : error instanceof IbptTaxError
+    ? ibptErrorForClient(error)
+    : error instanceof FocusNFeError
+    ? focusNFeErrorForClient(error, [focusNfeConfig.token])
+    : error instanceof SearchApiError
+      ? searchApiErrorForClient(error)
+      : { error: message };
+  return res.status(status).json(payload);
+});
+
+async function startServer() {
+  try {
+    await verifyDatabase();
+    app.listen(config.port, () => {
+      console.log(`Assistente de Precificação disponível em http://localhost:${config.port}`);
+    });
+  } catch (error) {
+    console.error(`[startup] Não foi possível iniciar o servidor (${error.code || "DATABASE_ERROR"}).`);
+    await pool.end();
+    process.exitCode = 1;
+  }
+}
+
+void startServer();
