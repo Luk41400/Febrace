@@ -1,0 +1,72 @@
+# Integração Focus NFe
+
+## Configuração segura
+
+A consulta à Focus NFe é feita exclusivamente pelo backend. O navegador chama `GET /fiscal/ncms/:codigo` com a sessão do usuário e nunca recebe o token.
+
+Configure no ambiente do processo:
+
+```dotenv
+FOCUS_NFE_TOKEN=seu-token-configurado-fora-do-git
+FOCUS_NFE_BASE_URL=https://homologacao.focusnfe.com.br
+FOCUS_NFE_TIMEOUT_MS=5000
+```
+
+Use homologação no desenvolvimento e nos testes. Quando `NODE_ENV=production`, a URL padrão passa a ser `https://api.focusnfe.com.br`; em outros ambientes, o padrão é homologação. `FOCUS_NFE_BASE_URL` é opcional e serve apenas para substituir essa escolha explicitamente. O token precisa pertencer ao mesmo ambiente da URL. O código aceita somente essas duas origens e acrescenta o prefixo `/v2` internamente.
+
+O token é usado como usuário do HTTP Basic, com senha vazia. Ele não é persistido no banco, retornado em respostas ou incluído em logs. `.env`, variantes de ambiente, chaves e a pasta `secrets/` são ignorados pelo Git; `.env.example` contém apenas valor fictício.
+
+## O que a Focus NFe fornece nesta integração
+
+- Consulta oficial de um NCM exato em `GET /v2/ncms/{codigo}`.
+- Busca oficial por trechos da descrição fiscal em `GET /v2/ncms?descricao=...`.
+- Código, descrição completa e partes estruturais da classificação NCM.
+- Dados completos de NF-e recebidas, inclusive itens e valores fiscais, quando a conta/CNPJ tem acesso e a nota possui XML completo.
+
+O endpoint local `/fiscal/ncms/search?q=categoria&originalQuery=produto` normaliza a descrição em `js/domain/fiscal-classification.js`. Por exemplo, `iPhone 15 Pro Max 256GB Natural Titanium` produz `normalizedQuery: "telefone celular smartphone"` e `category: "telefone celular"`. As regras mapeiam vocabulário para categorias, nunca marcas para códigos NCM. Sem regra conhecida, o fallback remove medidas/variações explícitas e preserva palavras potencialmente relevantes para edição pelo usuário. Materiais e características como chocolate, couro, sem açúcar e sem glúten são preservados nas categorias correspondentes.
+
+A pesquisa de mercado continua usando seu termo original. Ao concluí-la, a área fiscal mostra produto original, categoria normalizada e **Alterar categoria**, iniciando a busca de sugestões separadamente. Editar a categoria invalida a confirmação e os resultados pendentes. O botão **Buscar NCM** permite pesquisar a descrição editada.
+
+A [documentação da Focus](https://doc.focusnfe.com.br/reference/consultar_ncms) define `descricao` como pesquisa por trecho. Por isso o backend consulta poucos sinônimos separadamente (para celular: `smartphone` e `telefones para redes celulares`), em vez de exigir que todos apareçam concatenados no texto oficial. Os resultados são deduplicados e filtrados antes de limitar a apresentação a dez sugestões. Cada consulta usa a página de até 50 itens fornecida pela Focus; se não houver relação textual suficiente, pede-se uma categoria mais precisa.
+
+`isRelevantFiscalNcm()` exige código de oito dígitos, descrição não vazia e vocabulário relacionado à categoria. Há regras pequenas de sinônimos para categorias conhecidas e sobreposição do substantivo principal no fallback. Uma descrição de alimentos não passa para celular. Essa é uma barreira de relevância mínima, não uma decisão fiscal automática: a escolha final continua com o usuário.
+
+A busca retorna `classificationId` e guarda seus candidatos na sessão existente. **Usar este NCM** chama `GET /fiscal/ncms/:codigo?classificationId=...`: só um candidato relevante da busca atual pode ser confirmado. O backend consulta o código exato, verifica que a Focus devolveu o mesmo código e revalida a descrição. A prova na sessão vincula código, descrição, categoria e produto original. `/tax/estimate` exige essa mesma prova e repete a validação de relevância. Confirmações antigas, sem esse vínculo, precisam ser refeitas para a estimativa; nenhum produto salvo é modificado.
+
+Os logs `[NCM]` incluem `originalQuery`, `normalizedQuery`, `provider`, `results` e `rejectedIrrelevantResults`, com remoção de secrets e caracteres de controle. A Focus NFe sugere e confirma o NCM; a estimativa posterior consulta a tabela IBPT local pelo código exato.
+
+O fluxo atual não possui cadastro de CNPJ, vínculo seguro de empresas ou importação de notas de fornecedores. Por isso a integração de NF-e recebidas foi avaliada, mas não ativada: fazê-lo agora exigiria coletar CNPJ, controlar versões, garantir autorização da conta e definir a conciliação entre itens da nota e produtos internos. Nenhuma manifestação, emissão, cancelamento ou alteração de documento fiscal é realizada.
+
+## O que a Focus NFe não fornece como cálculo
+
+A documentação oficial não apresenta um endpoint de cálculo tributário automático. A consulta de NCM não devolve alíquotas. O assistente, portanto, mantém a carga tributária agregada como dado informado/regra configurada e a identifica como estimativa.
+
+Antes de uso operacional, contador ou especialista fiscal precisa definir e manter regras que considerem, conforme o caso:
+
+- regime tributário;
+- UF de origem e destino;
+- CFOP e CST/CSOSN;
+- tipo de cliente e finalidade da operação;
+- ICMS, ICMS-ST, DIFAL, FCP, IPI e PIS/COFINS;
+- IBS, CBS, IS e transições da reforma tributária;
+- benefícios, reduções de base, CEST, créditos e exceções aplicáveis.
+
+`TaxRuleEngine` define a interface para substituir futuramente a regra agregada por um motor tributário especializado. O `ConfiguredTaxRuleEngine` atual nunca afirma que os tributos foram validados.
+
+## Comportamento em falhas
+
+Erros 401, 403, 404, 429, respostas inválidas, timeouts e falhas temporárias preservam status HTTP distintos e são convertidos em mensagens públicas sem credenciais. 429 e falhas temporárias têm tentativas limitadas. Consultas concluídas ficam em cache de memória por 24 horas, até 250 NCMs por processo. Quando a Focus NFe está indisponível, o cálculo financeiro existente continua disponível, mas a interface informa que o NCM e a tributação não foram validados.
+
+O endpoint `/health` informa apenas se o provedor está configurado e qual ambiente foi selecionado; nunca retorna o token. Na inicialização e nas consultas, os logs registram provedor, ambiente, NCM e status HTTP, sem `Authorization` ou credenciais.
+
+Os testes usam mocks e não chamam a API externa. Se `FOCUS_NFE_TOKEN` de homologação estiver configurado, rode `pnpm focus:check -- 09012100` para uma consulta não destrutiva de NCM. O script recusa execução quando a URL selecionada é a de produção.
+
+## Fontes oficiais consultadas
+
+- [Índice para agentes](https://doc.focusnfe.com.br/llms.txt)
+- [Ambientes](https://doc.focusnfe.com.br/reference/ambiente)
+- [Autenticação](https://doc.focusnfe.com.br/reference/autenticacao)
+- [Consulta de NCM por código](https://doc.focusnfe.com.br/reference/consultar_ncm_especifico)
+- [Consulta de NCM por descrição](https://doc.focusnfe.com.br/reference/consultar_ncms)
+- [NF-e recebidas](https://doc.focusnfe.com.br/reference/nfe-recebidas)
+- [Consulta de NF-e recebidas](https://doc.focusnfe.com.br/reference/consultar_nfes_recebidas)

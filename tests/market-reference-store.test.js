@@ -1,0 +1,93 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { clearMarketReference, loadMarketReference, marketRequestPayload, marketRuleForForm, saveMarketReference } from "../js/services/market-reference-store.js";
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, value),
+  };
+}
+
+test("preserva a referência de mercado durante reload e mantém o fallback manual", () => {
+  const storage = memoryStorage();
+  const selectedItem = {
+    id: "B001TESTE",
+    title: "Produto de teste 256 GB",
+    price: 7499,
+    currency: "BRL",
+    source: "Loja Exemplo",
+    seller: "Loja Exemplo",
+    category: "Smartphones",
+    url: "https://www.google.com/shopping/product/B001TESTE",
+  };
+
+  assert.equal(saveMarketReference(storage, { manualValue: 32, query: "produto teste", selectedItem }), true);
+  assert.deepEqual(loadMarketReference(storage), {
+    manualValue: 32,
+    query: "produto teste",
+    selectedItem: { ...selectedItem, image: "", consultedAt: "" },
+  });
+
+  clearMarketReference(storage);
+  assert.equal(loadMarketReference(storage), null);
+});
+
+test("ignora conteúdo inválido do armazenamento da sessão", () => {
+  const storage = memoryStorage();
+  storage.setItem("assistente-precificacao-market-reference-v1", "{invalido");
+  assert.equal(loadMarketReference(storage), null);
+  assert.equal(saveMarketReference(storage, { manualValue: 0, selectedItem: {} }), false);
+});
+
+test("remove URLs com esquemas executáveis do armazenamento da sessão", () => {
+  const storage = memoryStorage();
+  const selectedItem = {
+    id: "B003TESTE",
+    title: "Produto",
+    price: 10,
+    source: "Loja",
+    image: "data:image/svg+xml,<svg onload=alert(1)>",
+    url: "javascript:alert(1)",
+  };
+  assert.equal(saveMarketReference(storage, { manualValue: null, query: "produto", selectedItem }), true);
+  assert.equal(loadMarketReference(storage).selectedItem.image, "");
+  assert.equal(loadMarketReference(storage).selectedItem.url, "");
+});
+
+test("preserva referência externa quando o fallback manual ainda está vazio", () => {
+  const storage = memoryStorage();
+  const selectedItem = { id: "B002TESTE", title: "Produto sem fallback", price: 99.9, source: "Loja Exemplo", seller: "Loja Exemplo" };
+
+  assert.equal(saveMarketReference(storage, { manualValue: null, query: "produto", selectedItem }), true);
+  assert.equal(loadMarketReference(storage).manualValue, null);
+  assert.equal(loadMarketReference(storage).selectedItem.price, 99.9);
+});
+
+test("omite regra vazia do payload e restaura ausência persistida sem deixar o select inválido", () => {
+  assert.deepEqual(marketRequestPayload(null), {});
+  assert.deepEqual(marketRequestPayload({ rule: "" }), {});
+  assert.equal(marketRuleForForm("none"), "manual");
+  assert.equal(marketRuleForForm(undefined), "manual");
+  assert.equal(marketRuleForForm("market-average"), "market-average");
+});
+
+test("mantém regras presentes no payload para que o backend aplique a enumeração estrita", () => {
+  assert.deepEqual(marketRequestPayload({
+    rule: "manual",
+    query: "bolo",
+    marketplace: "Google Shopping",
+    provider: "SearchAPI",
+  }), {
+    rule: "manual",
+    query: "bolo",
+    marketplace: "Google Shopping",
+    provider: "SearchAPI",
+    selectedProduct: null,
+    stats: null,
+  });
+  assert.equal(marketRequestPayload({ rule: "valor-invalido" }).rule, "valor-invalido");
+});

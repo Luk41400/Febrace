@@ -1,0 +1,82 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { authoritativeProductSnapshot } from "../lib/pricing-persistence.js";
+import { calculatePricing, PricingValidationError } from "../js/domain/pricing-calculator.js";
+import { EMPTY_OPTIONAL_FIELD_IDS } from "../lib/validation.js";
+
+const inputs = { materialCost: 18.5, wasteRate: 0.05, packagingCost: 3.5, deliveryCost: 4, insuranceCost: 0.5, otherDirectExpenses: 1.5, monthlyPayroll: 12000, monthlyFixedCosts: 8000, expectedMonthlyUnits: 2000, taxRate: 0.06, paymentFeeRate: 0.028, commissionRate: 0.05, desiredNetMargin: 0.2, inventoryDays: 10, receivingDays: 7, paymentDays: 30, monthlyCapitalRate: 0.02, fiscalContext: { ncmCode: "18061000" } };
+
+test("servidor ignora derivados adulterados e devolve snapshot v7 autoritativo", () => {
+  const payload = { name: "Bolo", description: "", category: "Alimentos", suggestedPrice: 0.01, profitMargin: 99, pricing: { inputs, market: { rule: "manual" }, emptyOptionalFields: [] } };
+  const snapshot = authoritativeProductSnapshot(payload);
+  assert.equal(snapshot.suggestedPrice, 58.88);
+  assert.equal(snapshot.profitMargin, 20);
+  assert.equal(snapshot.calculationData.pricingSchemaVersion, 7);
+  assert.equal(snapshot.calculationData.pricingResult.technicalPrice, snapshot.suggestedPrice);
+  assert.deepEqual(snapshot.calculationData.pricingResult.presentation, calculatePricing(inputs).presentation);
+});
+
+test("backend repete a validação e não deixa preço existir com input inválido", () => {
+  assert.throws(() => authoritativeProductSnapshot({ name: "X", description: "", category: "C", pricing: { inputs: { ...inputs, expectedMonthlyUnits: 0 }, market: {} } }), PricingValidationError);
+});
+
+test("backend salva cálculo v7 com opcionais ausentes e preserva a lista validada", () => {
+  const minimalInputs = {
+    materialCost: 15,
+    desiredNetMargin: 0.1,
+    laborCostMode: "automatic",
+    freightPayer: "company",
+    allocationMethod: "quantity",
+    capitalRateSource: "informed",
+    discountType: "none",
+    fiscalContext: {},
+  };
+  const snapshot = authoritativeProductSnapshot({
+    name: "Produto mínimo",
+    description: "",
+    category: "Outros",
+    pricing: { inputs: minimalInputs, market: {}, emptyOptionalFields: [...EMPTY_OPTIONAL_FIELD_IDS] },
+  });
+  assert.equal(snapshot.suggestedPrice, 16.67);
+  assert.equal(snapshot.calculationData.inputs.taxRate, 0);
+  assert.equal(snapshot.calculationData.inputs.expectedMonthlyUnits, 1);
+  assert.deepEqual(snapshot.calculationData.emptyOptionalFields, EMPTY_OPTIONAL_FIELD_IDS);
+});
+
+test("NCM só é salvo como Focus validado se o código e a prova coincidem", () => {
+  const valid = authoritativeProductSnapshot({ name: "X", description: "", category: "C", pricing: { inputs, market: {}, fiscalValidation: { status: "success", source: "Focus NFe", code: "18061000", ncm: { codigo: "18061000", descricao_completa: "Cacau" }, environment: "homologação", checkedAt: "2026-01-01", productNameForNcmSearch: "Bolo de chocolate" } } });
+  assert.equal(valid.calculationData.fiscal.ncmValidation.status, "success");
+  assert.equal(valid.calculationData.fiscal.productNameForNcmSearch, "Bolo de chocolate");
+  assert.equal(valid.calculationData.fiscal.ncmDescription, "Cacau");
+  assert.equal(valid.calculationData.fiscal.ncmSource, "Focus NFe");
+  assert.equal(valid.calculationData.fiscal.ncmConfirmedAt, "2026-01-01");
+  const stale = authoritativeProductSnapshot({ name: "X", description: "", category: "C", pricing: { inputs: { ...inputs, fiscalContext: { ncmCode: "12345678" } }, market: {}, fiscalValidation: { status: "success", source: "Focus NFe", code: "18061000", ncm: { codigo: "18061000" } } } });
+  assert.equal(stale.calculationData.fiscal.ncmValidation.status, "unverified");
+});
+
+test("snapshot descarta esquemas de URL executáveis em referência adulterada", () => {
+  const payload = {
+    name: "X",
+    description: "",
+    category: "C",
+    pricing: {
+      inputs: { ...inputs, marketPrice: null },
+      market: {
+        rule: "selected-product",
+        selectedProduct: {
+          id: "produto-1",
+          title: "Referência",
+          source: "Loja",
+          price: 100,
+          currency: "BRL",
+          image: "data:image/svg+xml,<svg onload=alert(1)>",
+          url: "javascript:alert(1)",
+        },
+      },
+    },
+  };
+  const snapshot = authoritativeProductSnapshot(payload);
+  const selected = snapshot.calculationData.market.selectedProduct;
+  assert.equal(selected.image, "");
+  assert.equal(selected.url, "");
+});

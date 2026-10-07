@@ -1,0 +1,500 @@
+import assert from "node:assert/strict";
+import { once } from "node:events";
+import test from "node:test";
+import express from "express";
+
+import { createAiPricingRouter, handleAiRequestError } from "../lib/ai-pricing-route.js";
+import { createAiFormProvider } from "../lib/ai-form-assistant.js";
+import { getAiAssistantConfig } from "../lib/config.js";
+import { createGeminiFormProvider } from "../lib/gemini-form-provider.js";
+
+const extraction = { entries: [{ field: "averageOrderFreight", value: 7, source: "user_provided", evidence: "frete médio do pedido de 7 reais", basis: "not-applicable", certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null }] };
+const input = { message: "Coloque frete médio do pedido de 7 reais." };
+
+async function serverFor(t, provider, rateLimitOptions = {}, { trustProxy = false, logger = { warn() {} }, sessionError } = {}) {
+  const app = express();
+  if (trustProxy) app.set("trust proxy", 1);
+  app.use(express.json());
+  // Only this isolated HTTP harness has test headers; production uses requireAuth.
+  const requireAuth = (req, res, next) => {
+    if (sessionError) return next(sessionError);
+    const id = req.get("x-test-user");
+    if (!id) return res.status(401).json({ code: "SESSION_REQUIRED" });
+    req.user = { id };
+    next();
+  };
+  app.use("/ai", createAiPricingRouter({ requireAuth, provider, rateLimitOptions, logger }));
+  app.use("/ai", handleAiRequestError);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise((resolve, reject) => {
+    server.closeAllConnections();
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+  const base = `http://127.0.0.1:${server.address().port}/ai/parse-pricing`;
+  return async (body = input, headers = { "x-test-user": "user-a" }, raw = false) => {
+    const res = await fetch(base, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: raw ? body : JSON.stringify(body) });
+    return { status: res.status, headers: res.headers, body: await res.json() };
+  };
+}
+
+test("rota HTTP exige autenticação antes de chamar o provider", async (t) => {
+  let calls = 0;
+  const request = await serverFor(t, { extract: async () => { calls += 1; return extraction; } });
+  const result = await request(input, {});
+  assert.equal(result.status, 401);
+  assert.equal(result.body.code, "SESSION_REQUIRED");
+  assert.equal(result.headers.get("cache-control"), "no-store");
+  assert.equal(calls, 0);
+});
+
+test("rota HTTP retorna patch e prévia validados, sem prompts ou extração bruta", async (t) => {
+  const request = await serverFor(t, { extract: async (message) => {
+    assert.equal(message, input.message);
+    return extraction;
+  } });
+  const result = await request();
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.fields, { averageOrderFreight: 7 });
+  assert.equal(result.body.summary[0].field, "averageOrderFreight");
+  assert.deepEqual(Object.keys(result.body), ["fields", "sources", "skipped", "summary", "pending", "needsClarification", "calculationReady"]);
+  assert.deepEqual(result.body.skipped, {});
+  assert.deepEqual(result.body.pending, []);
+  assert.equal(result.body.needsClarification, false);
+  assert.equal(result.headers.get("cache-control"), "no-store");
+});
+
+test("rota conclui esclarecimento parcial, preserva análise anterior e registra somente diagnóstico seguro", async (t) => {
+  const initialMessage = "Quero vender um bolo, usei 15 reais para fazer, e quero lucro de 10%";
+  const makeEntry = (field, value, evidence, basis = "not-applicable") => ({
+    field, value, source: "user_provided", evidence, basis, certainty: "certain",
+    batchUnits: null, batchEvidence: null, correctionEvidence: null,
+  });
+  let calls = 0;
+  const provider = { extract: async (message, clarification) => {
+    calls += 1;
+    if (calls === 1) return { entries: [
+      makeEntry("productName", "bolo", "vender um bolo"),
+      makeEntry("materialCost", 15, "usei 15 reais para fazer", "unknown"),
+      makeEntry("desiredNetMargin", 10, "lucro de 10%"),
+    ] };
+    assert.equal(message, "por unidade");
+    assert.equal(clarification.context, initialMessage);
+    assert.deepEqual(clarification.previousAnalysis.fields, { productName: "bolo", desiredNetMargin: 10 });
+    assert.deepEqual(clarification.previousAnalysis.sources, { productName: "user_provided", desiredNetMargin: "user_provided" });
+    return { entries: [makeEntry("materialCost", 15, "usei 15 reais para fazer", "unit")] };
+  } };
+  const records = [];
+  const logger = {
+    info: (...args) => records.push(args),
+    warn: (...args) => records.push(args),
+  };
+  const request = await serverFor(t, provider, {}, { logger });
+  const first = await request({ message: initialMessage });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.needsClarification, true);
+  const second = await request({
+    message: "por unidade",
+    clarification: {
+      context: initialMessage,
+      previousAnalysis: {
+        fields: first.body.fields,
+        sources: first.body.sources,
+        pending: first.body.pending.map(({ code, field }) => ({ code, field })),
+        needsClarification: first.body.needsClarification,
+      },
+    },
+  });
+  assert.equal(second.status, 200);
+  assert.deepEqual(second.body.fields, { productName: "bolo", desiredNetMargin: 10, materialCost: 15 });
+  assert.deepEqual(second.body.pending, []);
+  assert.equal(second.body.needsClarification, false);
+  const diagnosticLines = records.map(([message]) => message).filter((message) => typeof message === "string");
+  for (const expected of [
+    "[AI] clarification=true", "[AI] previousAnalysisPresent=true", "[AI] upstreamStatus=200",
+    "[AI] parseSuccess=true", "[AI] mergeSuccess=true", "[AI] validationSuccess=true",
+  ]) assert.ok(diagnosticLines.includes(expected), expected);
+  assert.ok(diagnosticLines.some((line) => /^\[AI\] requestId=[0-9a-f-]{36}$/.test(line)));
+  assert.doesNotMatch(JSON.stringify(records), /usei 15|por unidade|GEMINI_API_KEY|cookie|headers/i);
+});
+
+test("rota conclui quantidade mensal com resposta curta e mantém os campos anteriores", async (t) => {
+  const fields = {
+    productName: "bolo", materialCost: 15, wasteRate: 5, packagingCost: 2, averageOrderFreight: 0, averageOrderUnits: 1,
+    monthlyLaborCost: 0, monthlyProductiveHours: 160, productionTimeMinutes: 0, monthlyFixedCosts: 0, taxRate: 0,
+    desiredNetMargin: 10, inventoryDays: 0, receivingDays: 0, paymentDays: 0, monthlyCapitalRate: 0,
+  };
+  const sources = Object.fromEntries(Object.keys(fields).map((field) => [
+    field, ["wasteRate", "packagingCost"].includes(field) ? "estimated" : "user_provided",
+  ]));
+  const provider = {
+    fillMode: "complete",
+    extract: async (message, clarification) => {
+      assert.equal(message, "É DE 10");
+      assert.deepEqual(clarification.previousAnalysis.pending, [
+        { code: "AI_REQUIRED_FIELD_MISSING", field: "expectedMonthlyUnits" },
+      ]);
+      return { entries: [{
+        field: "expectedMonthlyUnits", value: 10, source: "user_provided", evidence: "É DE 10",
+        basis: "not-applicable", certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null,
+      }] };
+    },
+  };
+  const request = await serverFor(t, provider);
+  const result = await request({
+    message: "É DE 10",
+    clarification: {
+      context: "Quero vender bolo, meu custo por unidade é R$ 15 e quero margem de 10%",
+      previousAnalysis: {
+        fields, sources,
+        pending: [{ code: "AI_REQUIRED_FIELD_MISSING", field: "expectedMonthlyUnits" }],
+        needsClarification: true,
+      },
+    },
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.fields.expectedMonthlyUnits, 10);
+  assert.equal(result.body.fields.productName, "bolo");
+  assert.equal(result.body.fields.materialCost, 15);
+  assert.equal(result.body.fields.desiredNetMargin, 10);
+  assert.equal(result.body.sources.expectedMonthlyUnits, "user_provided");
+  assert.deepEqual(result.body.pending, []);
+  assert.equal(result.body.needsClarification, false);
+  assert.equal(result.body.calculationReady, true);
+});
+
+test("falha Zod registra somente campo, tipos e regra seguros", async (t) => {
+  const records = [];
+  const logger = { info: (...args) => records.push(args), warn: (...args) => records.push(args) };
+  const request = await serverFor(t, { extract: async () => ({ entries: [{
+    field: "PRIVATE_INVALID_FIELD", value: 7, source: "user_provided", evidence: "PRIVATE_USER_CONTENT",
+    basis: "unit", certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null,
+  }] }) }, {}, { logger });
+  const result = await request();
+  assert.equal(result.status, 502);
+  assert.equal(result.body.code, "GEMINI_INVALID_RESPONSE");
+  const lines = records.map(([message]) => message);
+  for (const expected of [
+    "[AI] validationFailed=true",
+    "[AI] invalidField=field",
+    "[AI] expectedType=allowed_enum_value",
+    "[AI] receivedType=string",
+    "[AI] validationRule=zod.invalid_enum_value",
+  ]) assert.ok(lines.includes(expected), expected);
+  assert.doesNotMatch(JSON.stringify(records), /PRIVATE_INVALID_FIELD|PRIVATE_USER_CONTENT|test-only-secret/);
+});
+
+test("falha semântica identifica evidence e regra sem registrar seu conteúdo", async (t) => {
+  const records = [];
+  const logger = { info: (...args) => records.push(args), warn: (...args) => records.push(args) };
+  const request = await serverFor(t, { extract: async () => ({ entries: [{
+    field: "materialCost", value: 15, source: "user_provided", evidence: "PRIVATE_USER_CONTENT",
+    basis: "unit", certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null,
+  }] }) }, {}, { logger });
+  const result = await request({ message: "Quero vender bolo e tenho um custo." });
+  assert.equal(result.status, 502);
+  assert.equal(result.body.code, "GEMINI_INVALID_RESPONSE");
+  const lines = records.map(([message]) => message);
+  for (const expected of [
+    "[AI] validationFailed=true",
+    "[AI] invalidField=materialCost.evidence",
+    "[AI] expectedType=grounded_literal_string",
+    "[AI] receivedType=string",
+    "[AI] validationRule=invalid_user_provided_grounding",
+  ]) assert.ok(lines.includes(expected), expected);
+  assert.doesNotMatch(JSON.stringify(records), /PRIVATE_USER_CONTENT|Quero vender bolo|test-only-secret/);
+});
+
+test("brigadeiros: provider simulado passa pelo HTTP e valida lote sem inventar dados pendentes", async (t) => {
+  const message = "quero vender brigadeiros. gasto R$ 40 em ingredientes para produzir 100 unidades, R$ 10 em embalagens e quero margem de 30%";
+  const batchEvidence = "para produzir 100 unidades";
+  const entries = [
+    { field: "productName", value: "brigadeiros", source: "user_provided", evidence: "quero vender brigadeiros", basis: "not-applicable", certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null },
+    { field: "materialCost", value: 40, source: "user_provided", evidence: "gasto R$ 40 em ingredientes", basis: "batch-total", certainty: "certain", batchUnits: 100, batchEvidence, correctionEvidence: null },
+    { field: "packagingCost", value: 10, source: "user_provided", evidence: "R$ 10 em embalagens", basis: "batch-total", certainty: "certain", batchUnits: 100, batchEvidence, correctionEvidence: null },
+    { field: "desiredNetMargin", value: 30, source: "user_provided", evidence: "quero margem de 30%", basis: "not-applicable", certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null },
+  ];
+  let calls = 0;
+  const provider = createGeminiFormProvider({ apiKey: "test-only-secret", model: "gemini-3.5-flash-lite", timeoutMs: 5000 }, { fetchImpl: async (_url, options) => {
+    calls += 1;
+    assert.equal(JSON.parse(options.body).contents[0].parts[0].text, message);
+    return Response.json({ candidates: [{ finishReason: "STOP", content: { role: "model", parts: [{ text: JSON.stringify({ entries }) }] } }] });
+  } });
+  const request = await serverFor(t, provider);
+  const result = await request({ message });
+  assert.equal(result.status, 200);
+  assert.equal(calls, 1);
+  assert.deepEqual(result.body.fields, { productName: "brigadeiros", materialCost: 0.4, packagingCost: 0.1, desiredNetMargin: 30 });
+  assert.deepEqual(result.body.summary.map(({ field }) => field), ["productName", "materialCost", "packagingCost", "desiredNetMargin"]);
+  assert.match(result.body.summary.find(({ field }) => field === "materialCost").value, /0,40.*100 unidades/);
+  assert.match(result.body.summary.find(({ field }) => field === "packagingCost").value, /0,10.*100 unidades/);
+  assert.deepEqual(result.body.pending, []);
+  assert.doesNotMatch(JSON.stringify(result.body), /monthlyPayroll|expectedMonthlyUnits|taxRate|finalPrice|suggestedPrice|test-only-secret|batchEvidence/);
+});
+
+test("chave ausente reproduz 503 antes de qualquer chamada à Gemini", async (t) => {
+  let calls = 0;
+  const provider = createAiFormProvider(getAiAssistantConfig({}), { fetchImpl: async () => { calls += 1; throw new Error("não deve executar"); } });
+  const records = [];
+  const request = await serverFor(t, provider, {}, { logger: { warn: (...args) => records.push(args) } });
+  const result = await request();
+  assert.equal(result.status, 503);
+  assert.equal(result.body.code, "GEMINI_NOT_CONFIGURED");
+  assert.equal(calls, 0);
+  assert.deepEqual(records, [["[AI] Analysis failed", { code: "GEMINI_NOT_CONFIGURED", status: 503 }]]);
+});
+
+test("rota preserva null/ausência como não alterar e mantém zero explícito", async (t) => {
+  const request = await serverFor(t, { extract: async () => ({ entries: [
+    { field: "averageOrderFreight", value: 0, source: "user_provided", evidence: "frete médio do pedido de 0 reais", basis: "not-applicable", certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null },
+    { field: "packagingCost", value: null, source: "user_provided", evidence: "", basis: "unit", certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null },
+  ] }) });
+  const result = await request({ message: "Coloque frete médio do pedido de 0 reais." });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.fields, { averageOrderFreight: 0 });
+  assert.equal(result.body.summary.length, 1);
+});
+
+test("taxas atuais são validadas localmente e nunca são enviadas ao provider", async (t) => {
+  let providerArguments;
+  const provider = { extract: async (...args) => {
+    providerArguments = args;
+    return { entries: [{
+      field: "desiredNetMargin", value: 25, source: "user_provided", evidence: "margem para 25%", basis: "not-applicable",
+      certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null,
+    }] };
+  } };
+  const request = await serverFor(t, provider);
+  const result = await request({ message: "Mude a margem para 25%.", currentRates: { taxRate: 60, paymentFeeRate: 10, commissionRate: 5 } });
+  assert.equal(result.status, 200);
+  assert.deepEqual(providerArguments, ["Mude a margem para 25%."]);
+  assert.deepEqual(result.body.fields, {});
+  assert.deepEqual(result.body.pending.map(({ code }) => code), ["AI_RATE_SUM_INVALID"]);
+});
+
+test("inputs manuais válidos prevalecem sobre estimativas sem serem enviados à Gemini", async (t) => {
+  let providerArguments;
+  const provider = { fillMode: "complete", extract: async (...args) => {
+    providerArguments = args;
+    return { entries: [{
+      field: "otherDirectExpenses", value: 0, source: "estimated", evidence: "", basis: "unit",
+      certainty: "certain", batchUnits: null, batchEvidence: null, correctionEvidence: null,
+    }] };
+  } };
+  const request = await serverFor(t, provider);
+  const result = await request({ message: "Quero revisar meus custos.", currentFields: { averageOrderFreight: 7 } });
+  assert.equal(result.status, 200);
+  assert.deepEqual(providerArguments, ["Quero revisar meus custos."]);
+  assert.equal(result.body.fields.averageOrderFreight, 7);
+  assert.equal(result.body.sources.averageOrderFreight, "user_provided");
+  assert.equal(result.body.pending.some(({ field }) => field === "averageOrderFreight"), false);
+});
+
+test("contexto percentual inválido é rejeitado antes da chamada paga", async (t) => {
+  let calls = 0;
+  const request = await serverFor(t, { extract: async () => { calls += 1; return extraction; } });
+  for (const currentRates of [{ taxRate: 100 }, { taxRate: "10" }, { unknown: 5 }]) {
+    const result = await request({ ...input, currentRates });
+    assert.equal(result.status, 400);
+    assert.equal(result.body.code, "INVALID_AI_REQUEST");
+  }
+  assert.equal(calls, 0);
+});
+
+test("rota HTTP rejeita corpo desconhecido antes de consumir chamada paga", async (t) => {
+  let calls = 0;
+  const request = await serverFor(t, { extract: async () => { calls += 1; return extraction; } });
+  const result = await request({ ...input, fields: { materialCost: 20 } });
+  assert.equal(result.status, 400);
+  assert.equal(result.body.code, "INVALID_AI_REQUEST");
+  assert.equal(calls, 0);
+});
+
+test("JSON malformado e corpo excessivo não expõem trechos da mensagem nem chamam o modelo", async (t) => {
+  let calls = 0;
+  const records = [];
+  t.mock.method(console, "warn", (...args) => records.push(args));
+  const request = await serverFor(t, { extract: async () => { calls += 1; return extraction; } });
+  for (const [body, status] of [["{PRIVATE_USER_CONTENT", 400], [JSON.stringify({ message: "PRIVATE_USER_CONTENT".repeat(10000) }), 413]]) {
+    const result = await request(body, {}, true);
+    assert.equal(result.status, status);
+    assert.equal(result.body.code, "INVALID_AI_REQUEST");
+    assert.doesNotMatch(JSON.stringify(result.body), /PRIVATE_USER_CONTENT/);
+    assert.equal(result.headers.get("cache-control"), "no-store");
+  }
+  assert.equal(calls, 0);
+  assert.deepEqual(records.map((record) => record[1]), [
+    { code: "INVALID_AI_REQUEST", status: 400 },
+    { code: "INVALID_AI_REQUEST", status: 413 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(records), /PRIVATE_USER_CONTENT/);
+});
+
+test("rota HTTP distingue API indisponível, resposta inválida e insuficiente", async (t) => {
+  for (const [provider, status, code] of [
+    [null, 503, "GEMINI_NOT_CONFIGURED"],
+    [{ extract: async () => { throw new Error("test-only-secret + private prompt"); } }, 500, "AI_INTERNAL_ERROR"],
+    [{ extract: async () => ({ fields: { finalPrice: 100 } }) }, 502, "GEMINI_INVALID_RESPONSE"],
+    [{ extract: async () => ({ entries: [] }) }, 422, "AI_INSUFFICIENT_INFORMATION"],
+  ]) {
+    const request = await serverFor(t, provider);
+    const result = await request();
+    assert.equal(result.status, status);
+    assert.equal(result.body.code, code);
+    assert.doesNotMatch(JSON.stringify(result.body), /test-only-secret|private prompt/);
+  }
+});
+
+test("401 da Gemini permanece erro de integração, sem SESSION_REQUIRED nem dados privados", async (t) => {
+  const records = [];
+  const secret = "test-only-secret";
+  const provider = createGeminiFormProvider({ apiKey: secret, model: "gemini-3.5-flash-lite", timeoutMs: 5000 }, {
+    fetchImpl: async () => Response.json({
+      error: { code: 401, status: "UNAUTHENTICATED", message: `${secret} PRIVATE_PROMPT Authorization PRIVATE_USER_CONTENT` },
+    }, { status: 401, headers: { "x-request-id": "PRIVATE_REQUEST_ID" } }),
+  });
+  const request = await serverFor(t, provider, {}, { logger: { warn: (...args) => records.push(args) } });
+  const result = await request();
+  assert.equal(result.status, 502);
+  assert.equal(result.body.code, "GEMINI_UNAUTHORIZED");
+  assert.deepEqual(Object.keys(result.body), ["error", "code"]);
+  assert.deepEqual(records, [
+    ["[AI] upstreamStatus", 401],
+    ["[AI] upstreamErrorCode", 401],
+    ["[AI] upstreamErrorStatus", "UNAUTHENTICATED"],
+  ]);
+  assert.doesNotMatch(JSON.stringify([result.body, records]), /SESSION_REQUIRED|test-only-secret|PRIVATE_|Authorization|stack/);
+});
+
+test("rota diferencia rate limit do provedor de quota e de falha temporária", async (t) => {
+  for (const [upstreamStatus, upstreamCode, status, code] of [
+    [429, "rate_limit_exceeded", 429, "GEMINI_RATE_LIMITED"],
+    [429, "insufficient_quota", 503, "GEMINI_QUOTA_EXCEEDED"],
+    [503, "server_error", 503, "GEMINI_UNAVAILABLE"],
+  ]) {
+    const records = [];
+    const provider = createGeminiFormProvider({ apiKey: "test-only-secret", model: "gemini-3.5-flash-lite", timeoutMs: 5000 }, {
+      fetchImpl: async () => Response.json({ error: { code: upstreamStatus, status: "RESOURCE_EXHAUSTED", details: upstreamCode === "insufficient_quota" ? [{ "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel" }] }] : [], message: "PRIVATE_DETAIL" } }, { status: upstreamStatus }),
+    });
+    const request = await serverFor(t, provider, {}, { logger: { warn: (...args) => records.push(args) } });
+    const result = await request();
+    assert.equal(result.status, status);
+    assert.equal(result.body.code, code);
+    assert.notEqual(result.body.code, "AI_RATE_LIMITED");
+    assert.deepEqual(records, [
+      ["[AI] upstreamStatus", upstreamStatus],
+      ["[AI] upstreamErrorCode", upstreamStatus],
+      ["[AI] upstreamErrorStatus", "RESOURCE_EXHAUSTED"],
+    ]);
+    assert.doesNotMatch(JSON.stringify([result.body, records]), /PRIVATE_DETAIL|test-only-secret/);
+  }
+});
+
+test("BAD_REQUEST registra somente status estruturados seguros sem corpo externo", async (t) => {
+  const records = [];
+  const provider = createGeminiFormProvider({ apiKey: "test-only-secret", model: "gemini-3.5-flash-lite", timeoutMs: 5000 }, {
+    fetchImpl: async () => Response.json({ error: {
+      status: "INVALID_ARGUMENT", message: "PRIVATE_MESSAGE test-only-secret PRIVATE_USER_CONTENT",
+      details: [{
+        "@type": "type.googleapis.com/google.rpc.BadRequest",
+        fieldViolations: [{ field: "generationConfig.responseFormat.text.schema", description: "PRIVATE_DESCRIPTION" }],
+      }],
+    } }, { status: 400 }),
+  });
+  const request = await serverFor(t, provider, {}, { logger: { warn: (...args) => records.push(args) } });
+  const result = await request();
+  assert.equal(result.status, 502);
+  assert.equal(result.body.code, "GEMINI_BAD_REQUEST");
+  assert.deepEqual(records, [
+    ["[AI] upstreamStatus", 400],
+    ["[AI] upstreamErrorCode", null],
+    ["[AI] upstreamErrorStatus", "INVALID_ARGUMENT"],
+  ]);
+  assert.doesNotMatch(JSON.stringify([result.body, records]), /PRIVATE_|test-only-secret|description/);
+});
+
+test("falha inesperada anterior ao provider retorna 500 seguro, sem fingir indisponibilidade externa", async (t) => {
+  const records = [];
+  t.mock.method(console, "warn", (...args) => records.push(args));
+  let calls = 0;
+  const request = await serverFor(t, { extract: async () => { calls += 1; return extraction; } }, {}, {
+    sessionError: new Error("PRIVATE_DATABASE_URL PRIVATE_SESSION_SECRET PRIVATE_USER_CONTENT"),
+  });
+  const result = await request();
+  assert.equal(result.status, 500);
+  assert.equal(result.body.code, "AI_INTERNAL_ERROR");
+  assert.equal(calls, 0);
+  assert.deepEqual(records, [["[AI] Analysis failed", { code: "AI_INTERNAL_ERROR", status: 500 }]]);
+  assert.doesNotMatch(JSON.stringify([result.body, records]), /PRIVATE_|stack/);
+});
+
+test("timeout retorna 504 e libera a conta para uma nova análise", async (t) => {
+  let calls = 0;
+  let firstSignal;
+  const provider = createGeminiFormProvider({ apiKey: "test-only-secret", model: "gemini-3.5-flash-lite", timeoutMs: 20 }, {
+    fetchImpl: async (_url, options) => {
+      calls += 1;
+      if (calls === 1) {
+        firstSignal = options.signal;
+        return new Promise(() => {});
+      }
+      return Response.json({ candidates: [{ finishReason: "STOP", content: { role: "model", parts: [{ text: JSON.stringify(extraction) }] } }] });
+    },
+  });
+  const request = await serverFor(t, provider);
+  const timedOut = await request();
+  assert.equal(timedOut.status, 504);
+  assert.equal(timedOut.body.code, "GEMINI_TIMEOUT");
+  assert.equal(firstSignal.aborted, true);
+  assert.equal((await request()).status, 200);
+  assert.equal(calls, 2);
+});
+
+test("limite padrão é oito chamadas por minuto por usuário", async (t) => {
+  let calls = 0;
+  const request = await serverFor(t, { extract: async () => { calls += 1; return extraction; } });
+  for (let index = 0; index < 8; index += 1) assert.equal((await request()).status, 200);
+  const limited = await request();
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.code, "AI_RATE_LIMITED");
+  assert.ok(limited.headers.get("retry-after"));
+  assert.equal(calls, 8);
+});
+
+test("trocar IP não evade limite do usuário e trocar conta não evade limite do IP", async (t) => {
+  const provider = { extract: async () => extraction };
+  const accountRequest = await serverFor(t, provider, { limit: 2 }, { trustProxy: true });
+  assert.equal((await accountRequest(input, { "x-test-user": "a", "x-forwarded-for": "192.0.2.1" })).status, 200);
+  assert.equal((await accountRequest(input, { "x-test-user": "a", "x-forwarded-for": "192.0.2.2" })).status, 200);
+  assert.equal((await accountRequest(input, { "x-test-user": "a", "x-forwarded-for": "192.0.2.3" })).status, 429);
+  const ipRequest = await serverFor(t, provider, { limit: 2 });
+  assert.equal((await ipRequest(input, { "x-test-user": "a" })).status, 200);
+  assert.equal((await ipRequest(input, { "x-test-user": "b" })).status, 200);
+  assert.equal((await ipRequest(input, { "x-test-user": "c" })).status, 429);
+});
+
+test("bloqueia concorrência na mesma conta e libera após conclusão ou erro", async (t) => {
+  let complete;
+  let started;
+  const begin = new Promise((resolve) => { started = resolve; });
+  let calls = 0;
+  const request = await serverFor(t, { extract: async () => {
+    calls += 1;
+    if (calls === 1) {
+      started();
+      return new Promise((resolve) => { complete = resolve; });
+    }
+    if (calls === 2) throw new Error("unavailable");
+    return extraction;
+  } });
+  const first = request();
+  await begin;
+  const duplicate = await request();
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.body.code, "AI_REQUEST_IN_PROGRESS");
+  assert.equal(calls, 1);
+  complete(extraction);
+  assert.equal((await first).status, 200);
+  assert.equal((await request()).status, 500);
+  assert.equal((await request()).status, 200);
+});

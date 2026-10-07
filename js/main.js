@@ -1,0 +1,1585 @@
+import { calculatePricing } from "./domain/pricing-calculator.js";
+import { ConfiguredTaxRuleEngine } from "./domain/tax-rule-engine.js";
+import { MarketService } from "./services/market-service.js";
+import { ApiError, api } from "./services/api-client.js";
+import { TaxService, marketTaxError, marketTaxPrerequisiteError } from "./services/tax-service.js";
+import { normalizeProductForFiscalSearch, isRelevantFiscalNcm, normalizeNcmDescription } from "./domain/fiscal-classification.js";
+import { normalizeFiscalState } from "./domain/fiscal-context.js";
+import { clearMarketReference, loadMarketReference, marketRequestPayload, marketRuleForForm, saveMarketReference } from "./services/market-reference-store.js";
+import { applyAssistantFields, applySavedInputs, clearPricingInputs, FORM_OPTION_FIELD_IDS, migrateLegacyV5Inputs, migrateLegacyV6Inputs, PRICING_FIELD_IDS, readAssistantFieldContext, readAssistantRateContext, renderPricingErrors, validatePricingForm } from "./ui/form.js";
+import { createAiAssistant } from "./ui/ai-assistant.js";
+import { financialValueSize } from "./utils/formatters.js";
+import { renderDashboard, renderIncompleteDashboard } from "./ui/dashboard.js";
+import { renderProductDetails, renderProductsList } from "./ui/history.js";
+import { createProfileSettings } from "./ui/profile-settings.js";
+import { createPricingTabs } from "./ui/pricing-tabs.js";
+import { createPricingPanel } from "./ui/pricing-panel.js";
+
+const $ = (selector) => document.querySelector(selector);
+const themeStorageKey = "assistente-precificacao-theme";
+const detailRouteHashes = Object.freeze({ price: "#preco-calculado" });
+const market = new MarketService();
+const taxService = new TaxService();
+const taxRuleEngine = new ConfiguredTaxRuleEngine();
+const formFieldIds = [
+  "ncmCode",
+  "productOrigin",
+  "countryOfOrigin",
+  "taxRegime",
+  "originState",
+  "destinationState",
+  "cfop",
+  "taxSituation",
+  "customerType",
+  "operationPurpose",
+  "marketReferenceRule",
+  ...PRICING_FIELD_IDS,
+  ...FORM_OPTION_FIELD_IDS,
+];
+const elements = Object.fromEntries(formFieldIds.map((id) => [id, $(`#${id}`)]));
+const pricingTabs = createPricingTabs($(".pricing-sidebar"));
+createPricingPanel($(".app-shell"));
+const state = {
+  user: null,
+  products: [],
+  selectedProduct: null,
+  taxAvailability: null,
+  countryOfOrigin: "",
+};
+
+let focusState = emptyFocusState();
+let marketState = emptyMarketState();
+let manualMarketValue = elements.marketPrice.value;
+let productSearchTimer;
+let authenticationRevision = 0;
+let pendingDetailTarget = "";
+let revealAllPricingErrors = false;
+const touchedPricingFields = new Set();
+let marketSearchRevision = 0;
+let ncmLookupRevision = 0;
+let ncmSearchRevision = 0;
+let ncmSearchState = emptyNcmSearchState();
+const aiAssistant = createAiAssistant({
+  dialog: $("#aiAssistantDialog"),
+  openButtons: document.querySelectorAll("[data-ai-open]"),
+  parse: (message, { signal, clarification } = {}) => api.post("/ai/parse-pricing", {
+    message,
+    currentRates: readAssistantRateContext(elements),
+    currentFields: readAssistantFieldContext({
+      ...elements,
+      productName: $("#productName"),
+      productDescription: $("#productDescription"),
+    }),
+    ...(clarification ? { clarification } : {}),
+  }, { signal }),
+  hasSession: () => Boolean(state.user),
+  onApply: applyAiPricingFields,
+  onSearchMarket: () => {
+    pricingTabs.activate("market");
+    void searchMarket();
+  },
+});
+
+function applyAiPricingFields(fields, skipped = {}) {
+  const previousOrigin = elements.productOrigin.value;
+  const changedFields = applyAssistantFields(fields, {
+    ...elements,
+    productName: $("#productName"),
+    productDescription: $("#productDescription"),
+    marketQuery: $("#marketQuery"),
+  }, skipped);
+  changedFields.forEach((fieldId) => touchedPricingFields.add(fieldId));
+  // Preserve the same dependent state transitions as a manual form edit.
+  if (changedFields.includes("productOrigin") && elements.productOrigin.value !== previousOrigin) {
+    if (!changedFields.includes("originState")) elements.originState.value = "";
+    if (!changedFields.includes("countryOfOrigin")) elements.countryOfOrigin.value = "";
+    marketState = { ...marketState, tax: emptyMarketTaxState() };
+  }
+  state.countryOfOrigin = normalizeCountryOfOrigin(elements.countryOfOrigin.value);
+  if (changedFields.includes("marketPrice")) updateManualMarketValue();
+  if (changedFields.includes("cfop") || changedFields.includes("taxSituation")) {
+    document.querySelector(".fiscal-advanced-fields")?.setAttribute("open", "");
+  }
+  render();
+  const marketOnly = changedFields.length === 1 && changedFields[0] === "marketQuery";
+  const validation = validatePricingForm(elements);
+  const pending = [...new Set(Object.values(validation.errors))];
+  const message = marketOnly
+    ? "Busca preparada. Clique em Pesquisar no mercado para consultar os preços reais."
+    : validation.isValid
+      ? "Informações aplicadas. O simulador recalculou os resultados com suas fórmulas atuais."
+      : `Informações aplicadas. Para calcular, resolva: ${pending.join(" ")}`;
+  setMessage($("#saveProductStatus"), message, true);
+  return fields.marketQuery && !marketOnly ? `${message} A busca de mercado também está pronta para pesquisar.` : message;
+}
+
+function updateManualMarketValue() {
+  touchedPricingFields.add("marketPrice");
+  marketState = { ...marketState, selectedItem: null };
+  manualMarketValue = elements.marketPrice.value;
+  elements.marketReferenceRule.value = "manual";
+  clearMarketReference(window.sessionStorage);
+}
+
+function applyTheme(theme, persist = true) {
+  const normalizedTheme = theme === "dark" ? "dark" : "light";
+  const isDark = normalizedTheme === "dark";
+  document.documentElement.dataset.theme = normalizedTheme;
+  if (persist) {
+    try {
+      localStorage.setItem(themeStorageKey, normalizedTheme);
+    } catch {
+      // O tema continua funcionando mesmo que o armazenamento esteja indisponível.
+    }
+  }
+  document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
+    const nextThemeLabel = isDark ? "Modo claro" : "Modo escuro";
+    button.setAttribute("aria-label", `Ativar ${nextThemeLabel.toLowerCase()}`);
+    button.setAttribute("aria-pressed", String(isDark));
+    button.querySelector("[data-theme-label]").textContent = nextThemeLabel;
+    button.querySelector(".theme-symbol").textContent = isDark ? "☼" : "☾";
+  });
+}
+
+function toggleTheme() {
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+}
+
+const apiMessages = Object.freeze({
+  SESSION_REQUIRED: "Sua sessão expirou. Entre novamente.",
+  FOCUS_NFE_UNAUTHORIZED: "Não foi possível autenticar na Focus NFe.",
+  FOCUS_NFE_NCM_CONFIRMATION_REQUIRED: "Confirme o NCM para estimar os tributos.",
+  IBPT_NCM_NOT_FOUND: "O NCM confirmado não existe na tabela IBPT.",
+  IBPT_NOT_CONFIGURED: "A tabela IBPT não foi encontrada no servidor.",
+  IBPT_INVALID_FILE: "Não foi possível carregar a tabela tributária.",
+});
+
+function messageFor(error) {
+  if (error instanceof ApiError) return apiMessages[error.code] || error.message;
+  return "Não foi possível concluir a operação. Tente novamente.";
+}
+
+function setMessage(element, message = "", success = false) {
+  element.hidden = !message;
+  element.textContent = message;
+  element.classList.toggle("success", success);
+}
+
+function setFieldError(fieldId, message = "") {
+  const input = $(`#${fieldId}`);
+  const field = input.closest(".auth-field");
+  const messageElement = $(`#${fieldId}Error`);
+  field?.classList.toggle("has-error", Boolean(message));
+  input.setAttribute("aria-invalid", String(Boolean(message)));
+  if (!messageElement) return;
+  messageElement.hidden = !message;
+  messageElement.textContent = message;
+}
+
+function clearAuthErrors(form) {
+  form.querySelectorAll(".auth-field input").forEach((input) => setFieldError(input.id));
+}
+
+function isValidEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function passwordChecks(value) {
+  return {
+    length: value.length >= 8,
+    letter: /[A-Za-zÀ-ÖØ-öø-ÿ]/.test(value),
+    number: /\d/.test(value),
+  };
+}
+
+function isStrongPassword(value) {
+  return Object.values(passwordChecks(value)).every(Boolean);
+}
+
+function updatePasswordRequirements() {
+  const checks = passwordChecks($("#registerPassword").value);
+  document.querySelectorAll("[data-password-rule]").forEach((item) => item.classList.toggle("is-met", checks[item.dataset.passwordRule]));
+}
+
+function validateRegisterField(fieldId) {
+  const value = $(`#${fieldId}`).value;
+  const trimmedValue = value.trim();
+  let error = "";
+
+  if (fieldId === "registerName") {
+    if (!trimmedValue) error = "Preencha todos os campos obrigatórios.";
+    else if (trimmedValue.length < 2) error = "Informe seu nome completo.";
+  }
+
+  if (fieldId === "registerEmail") {
+    if (!trimmedValue) error = "Preencha todos os campos obrigatórios.";
+    else if (!isValidEmail(trimmedValue)) error = "Informe um e-mail válido.";
+  }
+
+  if (fieldId === "registerPassword") {
+    if (!value) error = "Preencha todos os campos obrigatórios.";
+    else if (!isStrongPassword(value)) error = "Use pelo menos 8 caracteres, incluindo letras e números.";
+  }
+
+  if (fieldId === "registerPasswordConfirmation") {
+    const password = $("#registerPassword").value;
+    if (!value) error = "Preencha todos os campos obrigatórios.";
+    else if (value !== password) error = "As senhas não coincidem.";
+  }
+
+  setFieldError(fieldId, error);
+  return !error;
+}
+
+function validateLoginField(fieldId) {
+  const value = $(`#${fieldId}`).value.trim();
+  const error = !value
+    ? "Preencha todos os campos obrigatórios."
+    : fieldId === "loginEmail" && !isValidEmail(value)
+      ? "Informe um e-mail válido."
+      : "";
+  setFieldError(fieldId, error);
+  return !error;
+}
+
+function setSubmitState(button, isLoading, label) {
+  button.disabled = isLoading;
+  button.setAttribute("aria-busy", String(isLoading));
+  button.querySelector("span").textContent = label;
+}
+
+function currentPricingValidation() {
+  const validation = validatePricingForm(elements);
+  renderPricingErrors(elements, validation.errors, revealAllPricingErrors ? null : touchedPricingFields);
+  return validation;
+}
+
+function renderPricingConditionalFields() {
+  const laborAutomatic = elements.laborCostMode.value === "automatic";
+  const allocationMethod = elements.allocationMethod.value;
+  const discountType = elements.discountType.value;
+  const capitalSource = elements.capitalRateSource.value;
+  $("#companyFreightShareField").hidden = elements.freightPayer.value !== "shared";
+  $("#automaticLaborFields").hidden = !laborAutomatic;
+  $("#manualLaborFields").hidden = laborAutomatic;
+  $("#allocationLaborHoursField").hidden = allocationMethod !== "labor-hours" || laborAutomatic;
+  $("#machineAllocationFields").hidden = allocationMethod !== "machine-hours";
+  $("#revenueAllocationFields").hidden = allocationMethod !== "revenue";
+  $("#monthlyCapitalRateField").hidden = capitalSource === "zero";
+  $("#capitalRateEstimateNotice").hidden = capitalSource !== "estimated";
+  $("#percentageDiscountField").hidden = discountType !== "percentage";
+  $("#fixedDiscountField").hidden = discountType !== "fixed";
+}
+
+function emptyMarketTaxState(overrides = {}) {
+  return { status: "idle", mode: "", expanded: false, result: null, calculations: null, suggestions: [], code: "", message: "", shortMessage: "", ...overrides };
+}
+
+function emptyFocusState() {
+  return { status: "idle", ncm: null, source: "", environment: "", checkedAt: "", productNameForNcmSearch: "", error: "", unavailable: false };
+}
+
+function emptyNcmSearchState(overrides = {}) {
+  return { status: "idle", query: "", originalQuery: "", normalizedQuery: "", category: "", classificationId: "", editing: true, results: [], error: "", ...overrides };
+}
+
+function emptyMarketState() {
+  return {
+    status: "idle",
+    query: "",
+    items: [],
+    stats: null,
+    selectedItem: null,
+    error: "",
+    consultedAt: "",
+    refreshError: "",
+    tax: emptyMarketTaxState(),
+  };
+}
+
+function currentFiscalClassification() {
+  const query = $("#ncmProductQuery").value || "";
+  return { ...normalizeProductForFiscalSearch(query), originalQuery: ncmSearchState.originalQuery || marketState.query || query.trim() };
+}
+
+function fiscalCategoryLabel(classification) {
+  const labels = {
+    "telefone celular": "Telefone celular / smartphone",
+    "computador portátil": "Notebook / computador portátil",
+    "aparelho de televisão": "Televisão / smart TV",
+    "bolo / confeitaria": "Bolo / confeitaria",
+  };
+  const category = String(classification.category || classification.normalizedQuery || "").trim();
+  return labels[category] || (category ? `${category[0].toLocaleUpperCase("pt-BR")}${category.slice(1)}` : "Categoria não informada");
+}
+
+function normalizeCountryOfOrigin(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").slice(0, 80);
+}
+
+function clearProductOriginGeography() {
+  elements.originState.value = "";
+  elements.countryOfOrigin.value = "";
+  state.countryOfOrigin = "";
+}
+
+function renderProductOriginFields() {
+  const isNational = elements.productOrigin.value === "nacional";
+  const isImported = elements.productOrigin.value === "importado";
+  $("#originStateField").hidden = !isNational;
+  $("#countryOfOriginField").hidden = !isImported;
+  elements.originState.disabled = !isNational;
+  elements.countryOfOrigin.disabled = !isImported;
+  elements.countryOfOrigin.value = state.countryOfOrigin;
+}
+
+function prepareFiscalClassification(originalQuery) {
+  const classification = normalizeProductForFiscalSearch(originalQuery);
+  ncmLookupRevision += 1;
+  ncmSearchRevision += 1;
+  elements.ncmCode.value = "";
+  elements.productOrigin.value = "";
+  clearProductOriginGeography();
+  focusState = emptyFocusState();
+  ncmSearchState = emptyNcmSearchState({ ...classification, query: classification.normalizedQuery, editing: false });
+  $("#ncmProductQuery").value = classification.normalizedQuery;
+  marketState = { ...marketState, tax: emptyMarketTaxState() };
+  return ncmSearchRevision;
+}
+
+function currentMarketTaxContext() {
+  const ncm = String(elements.ncmCode.value || "");
+  const classification = currentFiscalClassification();
+  return {
+    ncm,
+    ncmConfirmed: /^\d{8}$/.test(ncm) && focusState.status === "success" && focusState.ncm?.codigo === ncm
+      && Boolean(focusState.classificationId) && focusState.normalizedQuery === classification.normalizedQuery
+      && focusState.originalQuery === classification.originalQuery && isRelevantFiscalNcm(classification.normalizedQuery, focusState.ncm),
+    classificationId: focusState.classificationId || "",
+    originalQuery: classification.originalQuery,
+    normalizedQuery: classification.normalizedQuery,
+    productOrigin: elements.productOrigin.value,
+    countryOfOrigin: elements.productOrigin.value === "importado" ? state.countryOfOrigin : "",
+    originState: elements.productOrigin.value === "nacional" ? elements.originState.value : "",
+    destinationState: elements.destinationState.value,
+  };
+}
+
+function marketTaxSignature() {
+  const targets = marketTaxTargets();
+  const context = currentMarketTaxContext();
+  return JSON.stringify([
+    targets.mode,
+    targets.entries.map(({ key, item }) => [key, item.id, item.price]),
+    context.ncm,
+    context.ncmConfirmed,
+    context.productOrigin,
+    context.countryOfOrigin,
+    context.originState,
+    context.destinationState,
+    context.classificationId,
+    context.originalQuery,
+    context.normalizedQuery,
+  ]);
+}
+
+function marketStateForRender() {
+  if (marketState.tax?.signature && marketState.tax.signature !== marketTaxSignature()) {
+    marketState = { ...marketState, tax: emptyMarketTaxState() };
+  }
+  return {
+    ...marketState,
+    tax: marketState.tax || emptyMarketTaxState(),
+    taxContext: currentMarketTaxContext(),
+    taxAvailability: state.taxAvailability,
+  };
+}
+
+function renderMarketTaxContextStatus() {
+  const context = currentMarketTaxContext();
+  const targets = marketTaxTargets();
+  const status = $("#marketTaxContextStatus");
+  const prerequisiteError = marketTaxPrerequisiteError(context, targets.entries[0]?.item.price, state.taxAvailability);
+  if (!context.ncmConfirmed) status.textContent = "Classifique o produto para estimar os tributos.";
+  else if (prerequisiteError) status.textContent = prerequisiteError.message;
+  else {
+    const origin = context.productOrigin === "nacional" ? "Nacional" : "Importado (Fora do País)";
+    const geography = context.productOrigin === "nacional" ? `UF de origem ${context.originState || "não informada"}` : `país ${context.countryOfOrigin}`;
+    const basis = targets.mode === "selected"
+      ? `produto selecionado (${targets.entries[0].item.title})`
+      : "extremos da pesquisa (menor e maior valor)";
+    status.textContent = `Pronto para estimar com base no ${basis}: NCM ${context.ncm} · Origem: ${origin} · ${geography} · UF de destino ${context.destinationState || "não informada"}.`;
+  }
+}
+
+function marketReferenceFromState(inputs) {
+  const rule = elements.marketReferenceRule.value || "manual";
+  if (rule === "manual") return inputs.marketPrice ? { price: inputs.marketPrice, source: "manual", rule } : null;
+  if (rule === "selected-product" && marketState.selectedItem) {
+    return { price: marketState.selectedItem.price, source: marketState.selectedItem.source, rule, query: marketState.query, marketplace: marketState.marketplace, provider: marketState.provider, selectedProduct: marketState.selectedItem, stats: marketState.stats };
+  }
+  if (rule === "market-average" && marketState.stats) return { price: marketState.stats.average, source: marketState.marketplace || "Google Shopping", rule, query: marketState.query, marketplace: marketState.marketplace, provider: marketState.provider, stats: marketState.stats };
+  if (rule === "market-median" && marketState.stats) return { price: marketState.stats.median, source: marketState.marketplace || "Google Shopping", rule, query: marketState.query, marketplace: marketState.marketplace, provider: marketState.provider, stats: marketState.stats };
+  return null;
+}
+
+function render() {
+  renderProductOriginFields();
+  renderPricingConditionalFields();
+  const validation = currentPricingValidation();
+  const viewMarketState = marketStateForRender();
+  if (validation.isValid) {
+    const inputs = validation.inputs;
+    const result = calculatePricing(inputs, marketReferenceFromState(inputs));
+    const fiscalAssessment = taxRuleEngine.assess(inputs, focusState);
+    renderDashboard(document, result, viewMarketState, fiscalAssessment);
+  } else {
+    renderIncompleteDashboard(document, viewMarketState, validation.errors);
+  }
+  renderNcmState();
+  renderMarketTaxContextStatus();
+  $("#mobileSuggestedPrice").textContent = $("#suggestedPrice").textContent;
+  $("#mobileSuggestedPrice").setAttribute("data-financial-size", financialValueSize($("#mobileSuggestedPrice").textContent));
+  pricingTabs.updateCompletion();
+}
+
+function renderNcmState() {
+  const status = $("#ncmLookupStatus");
+  const editor = $("#ncmEditor");
+  const confirmedSummary = $("#ncmConfirmedSummary");
+  const actions = $("#ncmActions");
+  const queryInput = $("#ncmProductQuery");
+  const searchButton = $("#ncmSearchButton");
+  const changeButton = $("#ncmChangeButton");
+  const suggestionsHeading = $("#ncmSuggestionsHeading");
+  const suggestions = $("#ncmSuggestions");
+  const isConfirming = focusState.status === "loading";
+  const isSearching = ncmSearchState.status === "loading";
+  const isConfirmed = currentMarketTaxContext().ncmConfirmed;
+  const classification = currentFiscalClassification();
+  $("#fiscalOriginalProduct").textContent = classification.originalQuery || "Nenhum produto pesquisado";
+
+  editor.hidden = isConfirmed;
+  confirmedSummary.hidden = !isConfirmed;
+  actions.hidden = !isConfirmed;
+  $("#ncmConfirmedCategory").textContent = isConfirmed ? fiscalCategoryLabel(classification) : "";
+  $("#ncmConfirmedCode").textContent = isConfirmed ? focusState.ncm.codigo : "";
+
+  queryInput.readOnly = isConfirmed || (!ncmSearchState.editing && Boolean(classification.normalizedQuery));
+  queryInput.setAttribute("aria-readonly", String(queryInput.readOnly));
+  searchButton.disabled = isSearching || isConfirming || isConfirmed;
+  searchButton.textContent = isSearching ? "Buscando..." : "Buscar NCM";
+  changeButton.hidden = !isConfirmed;
+
+  if (isConfirming) status.textContent = "Confirmando a classificação na Focus NFe…";
+  else if (isConfirmed) status.textContent = `✓ NCM confirmado · ${focusState.ncm.codigo} · Focus NFe (${focusState.environment}).`;
+  else if (ncmSearchState.status === "loading") status.textContent = "Buscando classificações na Focus NFe…";
+  else if (ncmSearchState.status === "empty") status.textContent = "Nenhuma classificação NCM foi encontrada com relação suficiente à categoria. Altere a categoria e informe o tipo, a função ou a composição do produto.";
+  else if (ncmSearchState.status === "error") status.textContent = ncmSearchState.error;
+  else if (focusState.status === "error") status.textContent = focusState.error;
+  else status.textContent = "Revise a categoria e escolha uma sugestão relacionada da Focus NFe. A categoria não determina o NCM.";
+
+  suggestions.replaceChildren();
+  suggestions.hidden = ncmSearchState.status !== "success" || ncmSearchState.results.length === 0 || isConfirmed;
+  suggestionsHeading.hidden = suggestions.hidden;
+  if (!suggestions.hidden) {
+    for (const result of ncmSearchState.results.filter((candidate) => isRelevantFiscalNcm(classification.normalizedQuery, candidate))) {
+      const item = document.createElement("li");
+      const content = document.createElement("div");
+      const code = document.createElement("strong");
+      const descriptionText = document.createElement("span");
+      const useButton = document.createElement("button");
+      code.textContent = result.code;
+      descriptionText.textContent = normalizeNcmDescription(result.description);
+      useButton.type = "button";
+      useButton.className = "secondary-button";
+      useButton.dataset.ncmSelect = result.code;
+      useButton.disabled = isConfirming;
+      useButton.textContent = "Usar este NCM";
+      content.append(code, descriptionText);
+      item.append(content, useButton);
+      suggestions.append(item);
+    }
+  }
+}
+
+function ncmSearchErrorMessage(error) {
+  if (error instanceof ApiError && ["FOCUS_NFE_UNAVAILABLE", "FOCUS_NFE_TIMEOUT", "FOCUS_NFE_NOT_CONFIGURED"].includes(error.code)) {
+    return "Não foi possível consultar a classificação fiscal agora.";
+  }
+  return messageFor(error);
+}
+
+async function searchNcmSuggestions() {
+  if (ncmSearchState.status === "loading") return;
+  const classification = currentFiscalClassification();
+  const query = classification.normalizedQuery;
+  const searchRevision = ++ncmSearchRevision;
+  ncmLookupRevision += 1;
+  elements.ncmCode.value = "";
+  focusState = emptyFocusState();
+  marketState = { ...marketState, tax: emptyMarketTaxState() };
+  $("#ncmProductQuery").value = query;
+  if (query.length < 3) {
+    ncmSearchState = emptyNcmSearchState({ status: "error", query, error: "Informe pelo menos 3 caracteres para buscar a classificação fiscal." });
+    render();
+    return;
+  }
+
+  ncmSearchState = emptyNcmSearchState({ ...classification, status: "loading", query, editing: false });
+  render();
+  try {
+    const response = await api.get(`/fiscal/ncms/search?q=${encodeURIComponent(query)}&originalQuery=${encodeURIComponent(classification.originalQuery)}`);
+    if (searchRevision !== ncmSearchRevision) return;
+    if (response.normalizedQuery !== query || response.originalQuery !== classification.originalQuery || !response.classificationId) throw new ApiError("A busca fiscal retornou uma categoria inesperada. Pesquise novamente.", 502, "NCM_CLASSIFICATION_REQUIRED");
+    const results = Array.isArray(response.results) ? response.results.filter((candidate) => isRelevantFiscalNcm(query, candidate)) : [];
+    ncmSearchState = emptyNcmSearchState({ ...classification, classificationId: response.classificationId, status: results.length ? "success" : "empty", query, results, editing: false });
+  } catch (error) {
+    if (searchRevision !== ncmSearchRevision) return;
+    ncmSearchState = emptyNcmSearchState({ ...classification, status: "error", query, error: ncmSearchErrorMessage(error) });
+  }
+  render();
+}
+
+async function lookupNcm(code) {
+  const lookupRevision = ++ncmLookupRevision;
+  const normalizedCode = String(code || "");
+  const classification = currentFiscalClassification();
+  const classificationId = ncmSearchState.classificationId;
+  const candidate = ncmSearchState.results.find((result) => result.code === normalizedCode);
+  if (!classificationId || !isRelevantFiscalNcm(classification.normalizedQuery, candidate)) {
+    focusState = { ...emptyFocusState(), status: "error", error: "Escolha um NCM relacionado à categoria entre as sugestões atuais." };
+    elements.ncmCode.value = "";
+    render();
+    return;
+  }
+
+  focusState = { ...emptyFocusState(), status: "loading" };
+  render();
+  try {
+    const response = await api.get(`/fiscal/ncms/${encodeURIComponent(normalizedCode)}?classificationId=${encodeURIComponent(classificationId)}`);
+    if (lookupRevision !== ncmLookupRevision) return;
+    if (response.classificationId !== classificationId || response.ncm?.codigo !== normalizedCode
+      || response.normalizedQuery !== classification.normalizedQuery || response.originalQuery !== classification.originalQuery
+      || !isRelevantFiscalNcm(classification.normalizedQuery, response.ncm)) throw new ApiError("A descrição do NCM não corresponde à categoria atual.", 422, "NCM_IRRELEVANT");
+    elements.ncmCode.value = response.ncm.codigo;
+    focusState = {
+      status: "success",
+      ncm: response.ncm,
+      source: "Focus NFe",
+      environment: response.environment,
+      checkedAt: new Date().toISOString(),
+      productNameForNcmSearch: classification.originalQuery,
+      classificationId,
+      normalizedQuery: classification.normalizedQuery,
+      originalQuery: classification.originalQuery,
+      error: "",
+      unavailable: false,
+    };
+  } catch (error) {
+    if (lookupRevision !== ncmLookupRevision) return;
+    focusState = {
+      ...emptyFocusState(),
+      status: "error",
+      error: `${messageFor(error)} O cálculo financeiro foi mantido, mas não está fiscalmente validado.`,
+      unavailable: true,
+    };
+  }
+  render();
+  void maybeCalculateMarketTaxes();
+}
+
+function resetNcmClassification({ focusInput = false } = {}) {
+  const classification = currentFiscalClassification();
+  ncmLookupRevision += 1;
+  ncmSearchRevision += 1;
+  elements.ncmCode.value = "";
+  focusState = emptyFocusState();
+  ncmSearchState = emptyNcmSearchState({ ...classification, query: classification.normalizedQuery, editing: true });
+  marketState = { ...marketState, tax: emptyMarketTaxState() };
+  render();
+  if (focusInput) $("#ncmProductQuery").focus();
+}
+
+function closeMobileMenus({ restoreFocus = false } = {}) {
+  document.querySelectorAll("[data-mobile-menu-toggle]").forEach((button) => {
+    const wasOpen = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-label", "Abrir menu");
+    const menu = button.closest(".mobile-app-header")?.querySelector("[data-mobile-menu]");
+    if (menu) menu.hidden = true;
+    if (restoreFocus && wasOpen) button.focus();
+  });
+}
+
+function toggleMobileMenu(button) {
+  const menu = button.closest(".mobile-app-header")?.querySelector("[data-mobile-menu]");
+  if (!menu) return;
+  const willOpen = button.getAttribute("aria-expanded") !== "true";
+  closeMobileMenus();
+  button.setAttribute("aria-expanded", String(willOpen));
+  button.setAttribute("aria-label", willOpen ? "Fechar menu" : "Abrir menu");
+  menu.hidden = !willOpen;
+  if (willOpen) menu.querySelector("button")?.focus();
+}
+
+function showAuth(mode = "login", message = "") {
+  closeMobileMenus();
+  $("#bootScreen").hidden = true;
+  $("#authView").hidden = false;
+  $("#assistantView").hidden = true;
+  $("#productsView").hidden = true;
+  $("#aboutView").hidden = true;
+  $("#loginForm").hidden = mode !== "login";
+  $("#registerForm").hidden = mode !== "register";
+  $("#showLoginButton").classList.toggle("active", mode === "login");
+  $("#showRegisterButton").classList.toggle("active", mode === "register");
+  $("#showLoginButton").setAttribute("aria-selected", String(mode === "login"));
+  $("#showRegisterButton").setAttribute("aria-selected", String(mode === "register"));
+  clearAuthErrors($("#loginForm"));
+  clearAuthErrors($("#registerForm"));
+  setMessage($("#authMessage"), message);
+}
+
+function showAssistant(view = "dashboard") {
+  closeMobileMenus();
+  $("#bootScreen").hidden = true;
+  $("#authView").hidden = true;
+  $("#assistantView").hidden = false;
+  $("#productsView").hidden = true;
+  $("#aboutView").hidden = true;
+  const isPriceDetails = view === "price-details";
+  $("#dashboardView").hidden = isPriceDetails;
+  $("#priceDetailsView").hidden = !isPriceDetails;
+  $("#mobilePriceSummary").hidden = isPriceDetails;
+
+  if (isPriceDetails) {
+    const target = pendingDetailTarget || "overview";
+    pendingDetailTarget = "";
+    window.requestAnimationFrame(() => {
+      const detailSection = document.querySelector(`[data-detail-anchor="${target}"]`);
+      detailSection?.scrollIntoView({ block: "start" });
+      detailSection?.focus({ preventScroll: true });
+    });
+  } else {
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }
+}
+
+async function showProducts() {
+  closeMobileMenus();
+  $("#bootScreen").hidden = true;
+  $("#authView").hidden = true;
+  $("#assistantView").hidden = true;
+  $("#productsView").hidden = false;
+  $("#aboutView").hidden = true;
+  await loadProducts();
+}
+
+function showAbout() {
+  closeMobileMenus();
+  $("#bootScreen").hidden = true;
+  $("#authView").hidden = true;
+  $("#assistantView").hidden = true;
+  $("#productsView").hidden = true;
+  $("#aboutView").hidden = false;
+  window.scrollTo({ top: 0, behavior: "auto" });
+  $("#about-title")?.focus({ preventScroll: true });
+}
+
+async function syncRoute() {
+  if (!state.user) return;
+  if (window.location.hash === "#produtos") await showProducts();
+  else if (window.location.hash === "#sobre") showAbout();
+  else if (window.location.hash === detailRouteHashes.price) showAssistant("price-details");
+  else showAssistant("dashboard");
+}
+
+function navigate(view, detailTarget = "") {
+  closeMobileMenus();
+  if (detailTarget) pendingDetailTarget = detailTarget;
+  const hash = view === "products" ? "#produtos" : view === "about" ? "#sobre" : detailRouteHashes[view] || "#assistente";
+  if (window.location.hash === hash) {
+    void syncRoute();
+  } else {
+    window.location.hash = hash;
+  }
+}
+
+function setAuthenticatedUser(user, taxAvailability = null) {
+  if (state.user && String(state.user.id) !== String(user.id)) clearAuthenticatedState();
+  authenticationRevision += 1;
+  updateCurrentUser(user);
+  state.taxAvailability = taxAvailability;
+  void syncRoute();
+}
+
+function updateCurrentUser(user) {
+  state.user = user;
+  $("#currentUserName").textContent = user.name;
+}
+
+function clearAuthenticatedState() {
+  aiAssistant.invalidate();
+  authenticationRevision += 1;
+  clearTimeout(productSearchTimer);
+  productSearchTimer = undefined;
+  pendingDetailTarget = "";
+  state.user = null;
+  state.products = [];
+  state.selectedProduct = null;
+  state.taxAvailability = null;
+  resetCurrentProductForm({ focusProductName: false });
+  $("#productSearch").value = "";
+  $("#productSort").value = "desc";
+  $("#productsList").replaceChildren();
+  $("#productDetails").replaceChildren();
+  $("#productEditorForm").reset?.();
+  $("#productDialogTitle").textContent = "";
+  if ($("#productDialog").open) $("#productDialog").close();
+  setMessage($("#saveProductStatus"), "");
+  setMessage($("#historyMessage"), "");
+  $("#currentUserName").textContent = "Conta";
+  profileSettings.closeForSession();
+  clearMarketReference(window.sessionStorage);
+  window.history.replaceState(null, "", window.location.pathname);
+}
+
+function endSession(message = "Sua sessão expirou. Entre novamente.") {
+  clearAuthenticatedState();
+  showAuth("login", message);
+}
+
+function setMarketError(query, caughtError) {
+  let error = "Não foi possível consultar o mercado agora.";
+  if (caughtError instanceof ApiError && caughtError.code === "MARKET_RATE_LIMITED") {
+    error = "Muitas atualizações foram solicitadas. Aguarde um minuto e tente novamente.";
+  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_RATE_LIMITED") {
+    error = "O provedor limitou temporariamente as consultas. Aguarde um pouco e tente novamente.";
+  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_NOT_CONFIGURED") {
+    error = "Consulta de mercado temporariamente indisponível.";
+  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_UNAUTHORIZED") {
+    error = "Não foi possível autenticar a consulta de mercado.";
+  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_FORBIDDEN") {
+    error = "A conta do provedor não possui acesso à pesquisa no Google Shopping.";
+  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_TIMEOUT") {
+    error = "A consulta demorou mais que o esperado. Tente novamente.";
+  }
+
+  marketState = {
+    status: "error",
+    query,
+    items: [],
+    stats: null,
+    selectedItem: marketState.selectedItem,
+    error: `${error} Você ainda pode informar o preço médio dos concorrentes manualmente.`,
+  };
+}
+
+function maximumMarketItem() {
+  return marketState.items.reduce((current, item) => {
+    if (!Number.isFinite(item.price)) return current;
+    return !current || item.price > current.price ? item : current;
+  }, null);
+}
+
+function minimumMarketItem() {
+  return marketState.items.reduce((current, item) => {
+    if (!Number.isFinite(item.price)) return current;
+    return !current || item.price < current.price ? item : current;
+  }, null);
+}
+
+function marketTaxTargets() {
+  if (marketState.selectedItem) {
+    return { mode: "selected", entries: [{ key: "selected", item: marketState.selectedItem }] };
+  }
+  const minimum = minimumMarketItem();
+  const maximum = maximumMarketItem();
+  return {
+    mode: "extremes",
+    entries: [
+      ...(minimum ? [{ key: "minimum", item: minimum }] : []),
+      ...(maximum ? [{ key: "maximum", item: maximum }] : []),
+    ],
+  };
+}
+
+function setMarketTaxError(error) {
+  marketState = { ...marketState, tax: emptyMarketTaxState({ status: "error", ...marketTaxError(error), signature: marketTaxSignature() }) };
+}
+
+async function maybeCalculateMarketTaxes() {
+  marketStateForRender();
+  if (marketState.tax?.status !== "idle") return;
+  const context = currentMarketTaxContext();
+  const targets = marketTaxTargets();
+  if (!marketTaxPrerequisiteError(context, targets.entries[0]?.item.price, state.taxAvailability)) await calculateMarketTaxes();
+}
+
+async function calculateMarketTaxes() {
+  marketStateForRender();
+  if (marketState.tax?.status === "loading") return;
+  const targets = marketTaxTargets();
+  const context = currentMarketTaxContext();
+  const prerequisiteError = marketTaxPrerequisiteError(context, targets.entries[0]?.item.price, state.taxAvailability);
+  if (prerequisiteError) {
+    setMarketTaxError(prerequisiteError);
+    render();
+    if (prerequisiteError.code === "NCM_REQUIRED") $("#ncmProductQuery").focus();
+    return;
+  }
+  const signature = marketTaxSignature();
+  const pendingTax = emptyMarketTaxState({ status: "loading", signature });
+  const requestIsCurrent = () => marketState.tax === pendingTax && marketTaxSignature() === signature;
+  marketState = { ...marketState, tax: pendingTax };
+  render();
+  try {
+    const responses = await Promise.all(targets.entries.map(async ({ key, item }) => {
+      const response = await taxService.calculateForPrice({
+        ncm: context.ncm,
+        productOrigin: context.productOrigin,
+        countryOfOrigin: context.countryOfOrigin,
+        originState: context.originState,
+        destinationState: context.destinationState,
+        unitValue: item.price,
+        classificationId: context.classificationId,
+        originalQuery: context.originalQuery,
+        normalizedQuery: context.normalizedQuery,
+      });
+      return [key, response.calculation];
+    }));
+    if (!requestIsCurrent()) return;
+    const calculations = Object.fromEntries(responses);
+    marketState = {
+      ...marketState,
+      tax: emptyMarketTaxState({
+        status: "success",
+        mode: targets.mode,
+        expanded: false,
+        calculations,
+        result: calculations.selected || calculations.maximum || calculations.minimum,
+        signature,
+      }),
+    };
+  } catch (error) {
+    if (!requestIsCurrent()) return;
+    setMarketTaxError(error);
+  }
+  render();
+}
+
+async function searchMarket({ refresh = false } = {}) {
+  if (marketState.status === "loading") return;
+  const searchRevision = ++marketSearchRevision;
+  const query = refresh ? marketState.query : $("#marketQuery").value.trim();
+  if (query.length < 3) {
+    marketState = { ...marketState, status: "error", error: "Informe pelo menos 3 caracteres para pesquisar." };
+    render();
+    return;
+  }
+
+  const previousMarketState = marketState;
+  if (!refresh && elements.marketReferenceRule.value === "selected-product") {
+    elements.marketPrice.value = manualMarketValue === null ? "" : String(manualMarketValue);
+    elements.marketReferenceRule.value = "manual";
+  }
+  if (!refresh) clearMarketReference(window.sessionStorage);
+  const fiscalRevision = refresh ? null : prepareFiscalClassification(query);
+  marketState = { ...marketState, status: "loading", query, items: refresh ? marketState.items : [], stats: refresh ? marketState.stats : null, selectedItem: refresh ? marketState.selectedItem : null, error: "", refreshError: "", tax: emptyMarketTaxState() };
+  render();
+
+  try {
+    const data = await market.search(query, { refresh });
+    if (searchRevision !== marketSearchRevision) return;
+    const selectedItem = refresh && previousMarketState.selectedItem
+      ? data.items.find((item) => item.id === previousMarketState.selectedItem.id) || null
+      : null;
+    if (refresh && previousMarketState.selectedItem && !selectedItem) {
+      elements.marketPrice.value = manualMarketValue === null ? "" : String(manualMarketValue);
+      elements.marketReferenceRule.value = "manual";
+      clearMarketReference(window.sessionStorage);
+    }
+    if (selectedItem) saveMarketReference(window.sessionStorage, { manualValue: manualMarketValue || null, query: data.query, selectedItem });
+    marketState = {
+      ...marketState,
+      status: data.stats ? "success" : "empty",
+      ...data,
+      selectedItem,
+      error: "",
+    };
+  } catch (error) {
+    if (searchRevision !== marketSearchRevision) return;
+    setMarketError(query, error);
+    if (refresh) {
+      const refreshError = marketState.error.replace(" Você ainda pode informar o preço médio dos concorrentes manualmente.", "");
+      marketState = { ...previousMarketState, refreshError: `${refreshError} A consulta anterior foi mantida.` };
+    }
+  }
+
+  render();
+  if (marketState.status === "success" && fiscalRevision === ncmSearchRevision) void searchNcmSuggestions();
+  if (refresh && !marketState.refreshError) void maybeCalculateMarketTaxes();
+}
+
+function selectMarketProduct(id) {
+  const selected = marketState.items.find((candidate) => candidate.id === id);
+  const item = selected ? { ...selected, consultedAt: selected.consultedAt || new Date().toISOString() } : null;
+  if (!item) return;
+  if (elements.marketReferenceRule.value !== "selected-product") manualMarketValue = elements.marketPrice.value;
+  marketState = { ...marketState, selectedItem: item, tax: emptyMarketTaxState() };
+  elements.marketReferenceRule.value = "selected-product";
+  saveMarketReference(window.sessionStorage, { manualValue: manualMarketValue || null, query: marketState.query, selectedItem: item });
+  render();
+  void maybeCalculateMarketTaxes();
+}
+
+function restoreManualMarket({ focusSearch = false } = {}) {
+  elements.marketPrice.value = manualMarketValue === null ? "" : String(manualMarketValue);
+  touchedPricingFields.add("marketPrice");
+  elements.marketReferenceRule.value = "manual";
+  marketState = { ...marketState, selectedItem: null, tax: emptyMarketTaxState() };
+  clearMarketReference(window.sessionStorage);
+  render();
+  void maybeCalculateMarketTaxes();
+  if (focusSearch) {
+    pricingTabs.activate("market");
+    $("#marketQuery").focus();
+  }
+}
+
+function restoreMarketReferenceFromSession() {
+  const saved = loadMarketReference(window.sessionStorage);
+  if (!saved) return;
+  manualMarketValue = saved.manualValue === null ? "" : String(saved.manualValue).replace(".", ",");
+  marketState = { ...marketState, query: saved.query, selectedItem: saved.selectedItem };
+  elements.marketReferenceRule.value = "selected-product";
+  $("#marketQuery").value = saved.query;
+}
+
+function resetCurrentProductForm({ focusProductName = true } = {}) {
+  aiAssistant.invalidate();
+  // Invalida somente respostas locais pendentes; não inicia chamadas externas.
+  marketSearchRevision += 1;
+  ncmLookupRevision += 1;
+  ncmSearchRevision += 1;
+  clearPricingInputs(elements);
+  elements.productOrigin.value = "";
+  clearProductOriginGeography();
+  $("#productName").value = "";
+  $("#productDescription").value = "";
+  $("#marketQuery").value = "";
+  $("#ncmProductQuery").value = "";
+  elements.marketReferenceRule.value = "manual";
+  document.querySelector(".fiscal-advanced-fields")?.removeAttribute("open");
+  document.querySelectorAll(".advanced-pricing-options").forEach((details) => details.removeAttribute("open"));
+  focusState = emptyFocusState();
+  ncmSearchState = emptyNcmSearchState();
+  marketState = emptyMarketState();
+  manualMarketValue = "";
+  revealAllPricingErrors = false;
+  touchedPricingFields.clear();
+  clearMarketReference(window.sessionStorage);
+  pricingTabs.activate("product", { resetScroll: true });
+  render();
+  if (focusProductName) $("#productName").focus({ preventScroll: true });
+}
+
+function authenticatedRequestIsCurrent(revision, userId) {
+  return revision === authenticationRevision && Boolean(state.user) && String(state.user.id) === String(userId);
+}
+
+function productPayloadFromCalculator() {
+  const name = $("#productName").value.trim();
+  const description = $("#productDescription").value.trim();
+  revealAllPricingErrors = true;
+  const validation = currentPricingValidation();
+  if (!validation.isValid) {
+    renderIncompleteDashboard(document, marketState, validation.errors);
+    const firstInvalidField = elements[Object.keys(validation.errors)[0]];
+    const panel = firstInvalidField?.closest?.("[data-pricing-panel]");
+    if (panel) pricingTabs.activate(panel.dataset.pricingPanel, { focusTab: true });
+    firstInvalidField?.focus();
+    throw new ApiError("Corrija os campos indicados antes de salvar.", 400);
+  }
+  const inputs = validation.inputs;
+
+  if (!name) throw new ApiError("Informe o nome do produto antes de salvar.", 400);
+
+  return {
+    name,
+    description,
+    category: "Não categorizado",
+    pricing: {
+      inputs,
+      emptyOptionalFields: validation.emptyOptionalFields,
+      market: marketRequestPayload(marketReferenceFromState(inputs)),
+      fiscalValidation: focusState.status === "success" && focusState.ncm?.codigo === inputs.fiscalContext.ncmCode
+        ? {
+          status: "success",
+          source: "Focus NFe",
+          code: focusState.ncm.codigo,
+          ncm: focusState.ncm,
+          environment: focusState.environment,
+          checkedAt: focusState.checkedAt,
+          productNameForNcmSearch: focusState.productNameForNcmSearch,
+        }
+        : null,
+    },
+  };
+}
+
+async function saveProduct() {
+  const status = $("#saveProductStatus");
+  const button = $("#saveProductButton");
+  const requestRevision = authenticationRevision;
+  const requestUserId = state.user?.id;
+  try {
+    const payload = productPayloadFromCalculator();
+    button.disabled = true;
+    setMessage(status, "Salvando consulta…");
+    const response = await api.post("/products", payload);
+    if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+    // O servidor recalcula e devolve o snapshot que passa a ser a versão salva.
+    state.selectedProduct = response.product;
+    resetCurrentProductForm();
+    setMessage(status, "Produto salvo com sucesso. Você já pode cadastrar outro item.", true);
+  } catch (error) {
+    if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+    setMessage(status, messageFor(error));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function loadProducts() {
+  const requestRevision = authenticationRevision;
+  const requestUserId = state.user?.id;
+  const list = $("#productsList");
+  const search = $("#productSearch").value.trim();
+  const sort = $("#productSort").value;
+  setMessage($("#historyMessage"), "");
+  list.innerHTML = '<div class="empty-history">Carregando produtos…</div>';
+
+  try {
+    const params = new URLSearchParams({ search, sort });
+    const response = await api.get(`/products?${params.toString()}`);
+    if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+    state.products = response.products;
+    renderProductsList(list, state.products);
+  } catch (error) {
+    if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+    list.innerHTML = "";
+    setMessage($("#historyMessage"), messageFor(error));
+  }
+}
+
+function openDialog(dialog) {
+  if (!dialog.open) dialog.showModal();
+}
+
+function showProductDetails(product) {
+  state.selectedProduct = product;
+  $("#productDialogTitle").textContent = product.name;
+  $("#productDetails").hidden = false;
+  $("#productEditorForm").hidden = true;
+  renderProductDetails($("#productDetails"), product);
+  openDialog($("#productDialog"));
+}
+
+function showProductEditor(product) {
+  state.selectedProduct = product;
+  $("#productDialogTitle").textContent = `Editar ${product.name}`;
+  $("#productDetails").hidden = true;
+  const form = $("#productEditorForm");
+  form.hidden = false;
+  $("#editProductName").value = product.name;
+  $("#editProductDescription").value = product.description;
+  $("#editProductCategory").value = product.category;
+  $("#editCostPrice").value = product.costPrice;
+  $("#editAdditionalCosts").value = product.additionalCosts;
+  $("#editProfitMargin").value = product.profitMargin;
+  $("#editSuggestedPrice").value = product.suggestedPrice;
+  $("#editMarketplace").value = product.marketplace;
+  ["editCostPrice", "editAdditionalCosts", "editProfitMargin", "editSuggestedPrice", "editMarketplace"].forEach((id) => {
+    const field = $(`#${id}`);
+    if (field) field.readOnly = true;
+  });
+  openDialog($("#productDialog"));
+}
+
+async function getProduct(id) {
+  const requestRevision = authenticationRevision;
+  const requestUserId = state.user?.id;
+  const response = await api.get(`/products/${encodeURIComponent(id)}`);
+  return authenticatedRequestIsCurrent(requestRevision, requestUserId) ? response.product : null;
+}
+
+function reuseProduct(product) {
+  aiAssistant.invalidate();
+  // Nunca deixa valores da simulação anterior sobreviverem a campos ausentes.
+  clearPricingInputs(elements);
+  elements.productOrigin.value = "";
+  clearProductOriginGeography();
+  $("#productName").value = "";
+  $("#productDescription").value = "";
+  const data = product.calculationData || {};
+  const isLegacyV5 = data.version === 5 || data.pricingSchemaVersion === 5;
+  const isLegacyV6 = data.pricingSchemaVersion === 6;
+  const isLegacy = isLegacyV5 || isLegacyV6;
+  const savedInputs = isLegacyV5 ? migrateLegacyV5Inputs(data.inputs) : isLegacyV6 ? migrateLegacyV6Inputs(data.inputs) : data.inputs;
+  if (!applySavedInputs(savedInputs, elements, product.calculationData?.emptyOptionalFields)) {
+    setMessage($("#historyMessage"), "Esta consulta não possui os dados necessários para ser reutilizada.");
+    return;
+  }
+
+  $("#productName").value = product.name;
+  $("#productDescription").value = product.description || "";
+  // Um v5 não possuía prova de validação; ele nunca é promovido para Focus validado.
+  const savedValidation = !isLegacy ? data.fiscal?.ncmValidation : null;
+  const savedNcm = data.fiscal?.ncm;
+  const savedNcmQuery = !isLegacy ? String(data.fiscal?.productNameForNcmSearch || "") : "";
+  focusState = savedValidation?.status === "success" && savedValidation.code === savedInputs?.fiscalContext?.ncmCode
+    ? { status: "success", ncm: savedNcm, source: "Focus NFe", environment: savedValidation.environment, checkedAt: savedValidation.checkedAt, productNameForNcmSearch: savedNcmQuery, error: "", unavailable: false }
+    : emptyFocusState();
+  ncmSearchState = emptyNcmSearchState({ query: savedNcmQuery });
+  $("#ncmProductQuery").value = savedNcmQuery;
+  const savedMarket = data.market;
+  const reference = data.pricingResult?.market?.reference || savedMarket;
+  const savedManualValue = savedInputs?.marketPrice;
+  manualMarketValue = Number.isFinite(savedManualValue) && savedManualValue > 0 ? String(savedManualValue).replace(".", ",") : "";
+  marketState = {
+    ...marketState,
+    status: "idle",
+    query: reference?.query || "",
+    items: [],
+    stats: reference?.stats || null,
+    selectedItem: reference?.selectedProduct || null,
+    marketplace: reference?.marketplace || "Google Shopping",
+    provider: reference?.provider || "SearchAPI / Google Shopping",
+    error: "",
+  };
+  elements.marketReferenceRule.value = marketRuleForForm(reference?.rule);
+  if (marketState.selectedItem) saveMarketReference(window.sessionStorage, { manualValue: manualMarketValue || null, query: marketState.query, selectedItem: marketState.selectedItem });
+  else clearMarketReference(window.sessionStorage);
+  $("#marketQuery").value = marketState.query;
+  $("#productDialog").close();
+  render();
+  navigate("assistant");
+  setMessage($("#saveProductStatus"), isLegacy ? "Cálculo legado carregado: o frete e o seguro foram migrados com segurança; informe a nova mão de obra e revise os campos antes de salvar." : "Consulta carregada. Ajuste os inputs e salve uma nova versão.", true);
+}
+
+async function deleteProduct(id) {
+  if (!window.confirm("Excluir este produto do seu histórico? Esta ação não pode ser desfeita.")) return;
+  const requestRevision = authenticationRevision;
+  const requestUserId = state.user?.id;
+
+  try {
+    await api.delete(`/products/${encodeURIComponent(id)}`);
+    if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+    if ($("#productDialog").open) $("#productDialog").close();
+    setMessage($("#historyMessage"), "Produto excluído do seu histórico.", true);
+    await loadProducts();
+  } catch (error) {
+    if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+    setMessage($("#historyMessage"), messageFor(error));
+  }
+}
+
+async function editCurrentProduct(event) {
+  event.preventDefault();
+  const product = state.selectedProduct;
+  const requestRevision = authenticationRevision;
+  const requestUserId = state.user?.id;
+  const form = event.currentTarget;
+  if (!product || !form.reportValidity()) return;
+
+  const payload = {
+    name: $("#editProductName").value.trim(),
+    description: $("#editProductDescription").value.trim(),
+    category: $("#editProductCategory").value.trim(),
+  };
+
+  try {
+    const response = await api.patch(`/products/${encodeURIComponent(product.id)}`, payload);
+    if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+    state.selectedProduct = response.product;
+    $("#productDialog").close();
+    setMessage($("#historyMessage"), "Produto atualizado com sucesso.", true);
+    await loadProducts();
+  } catch (error) {
+    if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+    setMessage($("#historyMessage"), messageFor(error));
+  }
+}
+
+const profileSettings = createProfileSettings({
+  dialog: $("#profileDialog"),
+  elements: {
+    avatar: $("#profileAvatar"),
+    displayName: $("#profileDisplayName"),
+    displayEmail: $("#profileDisplayEmail"),
+    productCount: $("#profileProductCount"),
+    profileForm: $("#profileForm"),
+    nameInput: $("#profileName"),
+    nameError: $("#profileNameError"),
+    emailInput: $("#profileEmail"),
+    status: $("#profileStatus"),
+    saveButton: $("#profileSaveButton"),
+    cancelButton: $("#profileCancelButton"),
+    productsButton: $("#profileProductsButton"),
+    changePasswordButton: $("#profileChangePasswordButton"),
+    passwordPanel: $("#profilePasswordPanel"),
+    passwordForm: $("#profilePasswordForm"),
+    currentPasswordInput: $("#profileCurrentPassword"),
+    currentPasswordError: $("#profileCurrentPasswordError"),
+    newPasswordInput: $("#profileNewPassword"),
+    newPasswordError: $("#profileNewPasswordError"),
+    newPasswordConfirmationInput: $("#profileNewPasswordConfirmation"),
+    newPasswordConfirmationError: $("#profileNewPasswordConfirmationError"),
+    passwordSaveButton: $("#profilePasswordSaveButton"),
+    passwordToggleButtons: document.querySelectorAll("#profileDialog [data-password-toggle]"),
+  },
+  api,
+  getUser: () => state.user,
+  onUserUpdated: updateCurrentUser,
+  onOpenProducts: () => navigate("products"),
+});
+
+async function logout() {
+  const requestRevision = authenticationRevision;
+  const requestUserId = state.user?.id;
+  let message = "Você saiu da sua conta.";
+  try {
+    await api.post("/auth/logout", undefined, { handleUnauthorized: false });
+  } catch (error) {
+    message = "Os dados desta sessão foram removidos da tela. Não foi possível confirmar a saída no servidor; feche o navegador se estiver em um computador compartilhado.";
+  }
+
+  if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+  clearAuthenticatedState();
+  showAuth("login", message);
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const isValid = ["loginEmail", "loginPassword"].every(validateLoginField);
+  if (!isValid) return;
+  const button = form.querySelector("button[type=submit]");
+
+  try {
+    setSubmitState(button, true, "Entrando...");
+    setMessage($("#authMessage"), "");
+    const response = await api.post("/auth/login", {
+      email: $("#loginEmail").value.trim(),
+      password: $("#loginPassword").value,
+    }, { handleUnauthorized: false });
+    form.reset();
+    setAuthenticatedUser(response.user, response.taxEstimate);
+  } catch (error) {
+    setMessage($("#authMessage"), messageFor(error));
+  } finally {
+    setSubmitState(button, false, "Entrar");
+  }
+}
+
+async function submitRegistration(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const email = $("#registerEmail").value.trim().toLowerCase();
+  const password = $("#registerPassword").value;
+  const confirmation = $("#registerPasswordConfirmation").value;
+  const isValid = ["registerName", "registerEmail", "registerPassword", "registerPasswordConfirmation"].every(validateRegisterField);
+  if (!isValid) return;
+  const button = form.querySelector("button[type=submit]");
+
+  try {
+    setSubmitState(button, true, "Criando conta...");
+    setMessage($("#authMessage"), "");
+    const response = await api.post("/auth/register", {
+      name: $("#registerName").value.trim(),
+      email,
+      password,
+      passwordConfirmation: confirmation,
+    }, { handleUnauthorized: false });
+    form.reset();
+    updatePasswordRequirements();
+    $("#loginEmail").value = email;
+    showAuth("login", response.message);
+    $("#loginPassword").focus();
+  } catch (error) {
+    setMessage($("#authMessage"), messageFor(error));
+  } finally {
+    setSubmitState(button, false, "Criar conta");
+  }
+}
+
+ [...PRICING_FIELD_IDS]
+  .filter((fieldId) => fieldId !== "marketPrice")
+  .forEach((fieldId) => elements[fieldId].addEventListener("input", () => {
+    touchedPricingFields.add(fieldId);
+    render();
+  }));
+
+FORM_OPTION_FIELD_IDS.forEach((fieldId) => {
+  elements[fieldId].addEventListener("change", () => {
+    touchedPricingFields.add(fieldId);
+    render();
+  });
+});
+
+[
+  elements.taxRegime,
+  elements.originState,
+  elements.destinationState,
+  elements.cfop,
+  elements.taxSituation,
+  elements.customerType,
+  elements.operationPurpose,
+].forEach((field) => {
+  const updateField = () => {
+    if (field === elements.originState || field === elements.destinationState) {
+      field.value = normalizeFiscalState(field.value);
+      marketStateForRender();
+      void maybeCalculateMarketTaxes();
+    }
+    render();
+  };
+  field.addEventListener("input", updateField);
+  field.addEventListener("change", updateField);
+});
+
+elements.productOrigin.addEventListener("change", () => {
+  clearProductOriginGeography();
+  marketState = { ...marketState, tax: emptyMarketTaxState() };
+  render();
+  void maybeCalculateMarketTaxes();
+});
+
+let countryTaxRecalculationTimer;
+elements.countryOfOrigin.addEventListener("input", () => {
+  state.countryOfOrigin = normalizeCountryOfOrigin(elements.countryOfOrigin.value);
+  marketStateForRender();
+  render();
+  clearTimeout(countryTaxRecalculationTimer);
+  countryTaxRecalculationTimer = setTimeout(() => void maybeCalculateMarketTaxes(), 350);
+});
+
+elements.countryOfOrigin.addEventListener("change", () => {
+  clearTimeout(countryTaxRecalculationTimer);
+  state.countryOfOrigin = normalizeCountryOfOrigin(elements.countryOfOrigin.value);
+  elements.countryOfOrigin.value = state.countryOfOrigin;
+  marketStateForRender();
+  render();
+  void maybeCalculateMarketTaxes();
+});
+
+$("#ncmSearchButton").addEventListener("click", () => void searchNcmSuggestions());
+$("#ncmProductQuery").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  void searchNcmSuggestions();
+});
+$("#ncmProductQuery").addEventListener("input", () => {
+  resetNcmClassification();
+});
+$("#ncmSuggestions").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-ncm-select]");
+  if (button) void lookupNcm(button.dataset.ncmSelect);
+});
+$("#ncmChangeButton").addEventListener("click", () => resetNcmClassification({ focusInput: true }));
+
+elements.marketPrice.addEventListener("input", () => {
+  updateManualMarketValue();
+  render();
+  void maybeCalculateMarketTaxes();
+});
+
+elements.marketReferenceRule.addEventListener("change", render);
+
+$("#marketSearchButton").addEventListener("click", searchMarket);
+$("#marketRefreshButton").addEventListener("click", () => { void searchMarket({ refresh: true }); });
+$("#marketQuery").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  void searchMarket();
+});
+$("#marketPanel").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-market-select]");
+  if (button) selectMarketProduct(button.dataset.marketSelect);
+  if (event.target.closest("[data-market-retry]")) void searchMarket();
+  if (event.target.closest("[data-calculate-market-taxes]")) void calculateMarketTaxes();
+  if (event.target.closest("[data-confirm-market-ncm]")) {
+    pricingTabs.activate("market");
+    $("#ncmProductQuery").focus();
+  }
+  if (event.target.closest("[data-toggle-market-taxes]")) {
+    marketState = { ...marketState, tax: { ...marketState.tax, expanded: !marketState.tax.expanded } };
+    render();
+  }
+});
+$("#selectedMarketProduct").addEventListener("click", (event) => {
+  if (event.target.closest("[data-change-market-reference]")) restoreManualMarket({ focusSearch: true });
+});
+
+$("#showLoginButton").addEventListener("click", () => showAuth("login"));
+$("#showRegisterButton").addEventListener("click", () => showAuth("register"));
+document.querySelectorAll("[data-theme-toggle]").forEach((button) => button.addEventListener("click", toggleTheme));
+document.querySelectorAll("[data-auth-switch]").forEach((button) => {
+  button.addEventListener("click", () => showAuth(button.dataset.authSwitch));
+});
+$("#loginForm").addEventListener("submit", submitLogin);
+$("#registerForm").addEventListener("submit", submitRegistration);
+
+["loginEmail", "loginPassword"].forEach((fieldId) => {
+  const field = $(`#${fieldId}`);
+  field.addEventListener("blur", () => validateLoginField(fieldId));
+  field.addEventListener("input", () => {
+    if (field.getAttribute("aria-invalid") === "true") validateLoginField(fieldId);
+  });
+});
+
+["registerName", "registerEmail", "registerPassword", "registerPasswordConfirmation"].forEach((fieldId) => {
+  const field = $(`#${fieldId}`);
+  field.addEventListener("blur", () => {
+    if (fieldId === "registerEmail") field.value = field.value.trim().toLowerCase();
+    validateRegisterField(fieldId);
+  });
+  field.addEventListener("input", () => {
+    if (fieldId === "registerPassword") {
+      updatePasswordRequirements();
+      if ($("#registerPasswordConfirmation").value) validateRegisterField("registerPasswordConfirmation");
+    }
+    if (field.getAttribute("aria-invalid") === "true" || fieldId === "registerPassword") validateRegisterField(fieldId);
+  });
+});
+
+document.querySelectorAll("[data-password-toggle]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const input = $(`#${button.dataset.passwordToggle}`);
+    const isPassword = input.type === "password";
+    input.type = isPassword ? "text" : "password";
+    const label = button.querySelector("[data-password-toggle-label]");
+    if (label) label.textContent = isPassword ? "Ocultar senha" : "Mostrar senha";
+    else button.textContent = isPassword ? "Ocultar" : "Mostrar";
+    button.setAttribute("aria-label", isPassword ? "Ocultar senha" : "Mostrar senha");
+    button.setAttribute("aria-pressed", String(isPassword));
+  });
+});
+
+document.querySelectorAll("[data-mobile-menu-toggle]").forEach((button) => {
+  button.addEventListener("click", () => toggleMobileMenu(button));
+});
+
+document.querySelectorAll("[data-app-action]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const action = button.dataset.appAction;
+    closeMobileMenus();
+    if (action === "assistant") navigate("assistant");
+    if (action === "products") navigate("products");
+    if (action === "about") navigate("about");
+    if (action === "profile") void profileSettings.open(button);
+    if (action === "logout") void logout();
+  });
+});
+
+document.querySelectorAll("[data-detail-view]").forEach((button) => {
+  button.addEventListener("click", () => navigate(button.dataset.detailView, button.dataset.detailTarget || "overview"));
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".mobile-app-header")) closeMobileMenus();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeMobileMenus({ restoreFocus: true });
+});
+
+$("#showMobileResultButton").addEventListener("click", () => {
+  navigate("price", "overview");
+});
+
+$("#logoutButton").addEventListener("click", logout);
+$("#showProfileButton").addEventListener("click", (event) => void profileSettings.open(event.currentTarget));
+$("#showProductsButton").addEventListener("click", () => navigate("products"));
+$("#showAboutButton").addEventListener("click", () => navigate("about"));
+$("#backToDashboardButton").addEventListener("click", () => navigate("assistant"));
+$("#backToAssistantButton").addEventListener("click", () => navigate("assistant"));
+$("#aboutBackButton").addEventListener("click", () => navigate("assistant"));
+$("#saveProductButton").addEventListener("click", saveProduct);
+$("#productEditorForm").addEventListener("submit", editCurrentProduct);
+
+$("#productSearch").addEventListener("input", () => {
+  clearTimeout(productSearchTimer);
+  productSearchTimer = setTimeout(() => void loadProducts(), 250);
+});
+$("#productSort").addEventListener("change", () => void loadProducts());
+$("#productsList").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-product-action]");
+  if (!button) return;
+  const { productAction: action, productId: id } = button.dataset;
+  if (action === "delete") return deleteProduct(id);
+
+  const requestRevision = authenticationRevision;
+  const requestUserId = state.user?.id;
+  try {
+    const product = await getProduct(id);
+    if (!product) return;
+    if (action === "view") showProductDetails(product);
+    if (action === "edit") showProductEditor(product);
+    if (action === "reuse") reuseProduct(product);
+  } catch (error) {
+    if (!authenticatedRequestIsCurrent(requestRevision, requestUserId)) return;
+    setMessage($("#historyMessage"), messageFor(error));
+  }
+});
+$("#productDetails").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-dialog-product-action]");
+  if (!button || !state.selectedProduct) return;
+  const action = button.dataset.dialogProductAction;
+  if (action === "edit") showProductEditor(state.selectedProduct);
+  if (action === "reuse") reuseProduct(state.selectedProduct);
+  if (action === "delete") void deleteProduct(state.selectedProduct.id);
+});
+document.addEventListener("click", (event) => {
+  const closeButton = event.target.closest("[data-close-dialog]");
+  if (!closeButton) return;
+  closeButton.closest("dialog")?.close();
+});
+window.addEventListener("hashchange", () => void syncRoute());
+window.addEventListener("app:session-expired", () => {
+  endSession();
+});
+
+restoreMarketReferenceFromSession();
+applyTheme(document.documentElement.dataset.theme, false);
+render();
+
+async function bootstrap(attempt = 0, revision = authenticationRevision) {
+  if (revision !== authenticationRevision) return;
+  try {
+    const response = await api.get("/auth/me", { handleUnauthorized: false });
+    if (revision !== authenticationRevision) return;
+    setAuthenticatedUser(response.user, response.taxEstimate);
+  } catch (error) {
+    if (revision !== authenticationRevision) return;
+    if (error instanceof ApiError && error.code === "STATIC_HOSTING") {
+      showAuth("login", error.message);
+      return;
+    }
+    const isInactiveSession = error instanceof ApiError && error.code === "SESSION_REQUIRED";
+    if (!isInactiveSession && attempt < 2) {
+      window.setTimeout(() => void bootstrap(attempt + 1, revision), 800);
+      return;
+    }
+    if (isInactiveSession) {
+      endSession();
+      return;
+    }
+    showAuth("login", "Não foi possível conectar ao servidor.");
+  }
+}
+
+updatePasswordRequirements();
+void bootstrap();
