@@ -178,7 +178,7 @@ function apiFixture(status, code) {
       calls.push({ path, options });
       return { status, ok: status >= 200 && status < 300, json: async () => ({ error: "Mensagem pública", code }) };
     },
-    window: { location: { hostname: "fecart-2026.onrender.com" }, dispatchEvent: (event) => events.push(event.type) },
+    window: { location: { hostname: "fecart-2026.vercel.app" }, dispatchEvent: (event) => events.push(event.type) },
     CustomEvent: class { constructor(type) { this.type = type; } },
     console: { error() {} },
   });

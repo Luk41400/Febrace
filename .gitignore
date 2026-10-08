@@ -8,3 +8,4 @@ node_modules/
 secrets/
 coverage/
 .postgres-data/
+.vercel/

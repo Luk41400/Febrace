@@ -62,26 +62,26 @@ test("diagnóstico IA informa presença/configuração sem validar a chave nem e
   assert.doesNotMatch(JSON.stringify([missing, present, invalid]), /test-only-secret|PRIVATE_|apiKey|Authorization|operational/);
 });
 
-test("diagnóstico de deploy aceita somente o commit SHA do Render", () => {
+test("diagnóstico de deploy aceita somente o commit SHA da Vercel", () => {
   assert.deepEqual(deploymentHealth({}), { commit: null });
-  assert.deepEqual(deploymentHealth({ RENDER_GIT_COMMIT: "PRIVATE_BRANCH" }), { commit: null });
-  assert.deepEqual(deploymentHealth({ RENDER_GIT_COMMIT: "8EECC0203DD683152AB742A251738AD05FE9015A" }), {
+  assert.deepEqual(deploymentHealth({ VERCEL_GIT_COMMIT_SHA: "PRIVATE_BRANCH" }), { commit: null });
+  assert.deepEqual(deploymentHealth({ VERCEL_GIT_COMMIT_SHA: "8EECC0203DD683152AB742A251738AD05FE9015A" }), {
     commit: "8eecc0203dd683152ab742a251738ad05fe9015a",
   });
 });
 
-test("Blueprint Render prevê segredo externo e parâmetros de IA sem embutir uma chave", () => {
-  const blueprint = readFileSync(new URL("../render.yaml", import.meta.url), "utf8");
-  const keyBlock = blueprint.match(/- key: GEMINI_API_KEY\r?\n([\s\S]*?)(?=\s*- key:|\r?\ndatabases:)/)?.[1];
-  assert.ok(keyBlock, "GEMINI_API_KEY precisa estar declarada no Blueprint");
-  assert.match(keyBlock, /sync: false/);
-  assert.doesNotMatch(keyBlock, /value:|generateValue:/);
-  assert.match(blueprint, /- key: AI_PROVIDER\r?\n\s+value: gemini/);
-  assert.match(blueprint, /- key: AI_MODEL\r?\n\s+value: gemini-3\.5-flash-lite/);
-  assert.match(blueprint, /- key: AI_FILL_MODE\r?\n\s+value: complete/);
-  assert.match(blueprint, /- key: AI_TIMEOUT_MS\r?\n\s+value: "25000"/);
+test("deploy Vercel executa build e inclui HTML/CSV sem embutir segredos", () => {
+  const deployment = JSON.parse(readFileSync(new URL("../vercel.json", import.meta.url), "utf8"));
+  assert.equal(deployment.buildCommand, "pnpm build");
+  assert.equal(deployment.functions["server.js"].includeFiles, "**/*.{html,csv}");
+  assert.equal("env" in deployment, false);
   const server = readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /ai:\s*aiAssistantHealth\(aiConfig\)/);
+  assert.match(server, /export default app/);
+  assert.doesNotMatch(server, /app\.listen\(/);
+  const localStart = readFileSync(new URL("../start.js", import.meta.url), "utf8");
+  assert.match(localStart, /await verifyDatabase\(\)/);
+  assert.match(localStart, /app\.listen\(port/);
 });
 
 test("Gemini recebe mensagem e schema; chave somente no cabeçalho do backend", async () => {

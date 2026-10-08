@@ -9,7 +9,7 @@ import { rateLimit } from "express-rate-limit";
 import { getConfig, getFocusNfeConfig, getSearchApiConfig, getAiAssistantConfig, aiAssistantHealth, deploymentHealth, marketHealth } from "./lib/config.js";
 import { createAiFormProvider } from "./lib/ai-form-assistant.js";
 import { createAiPricingRouter, handleAiRequestError } from "./lib/ai-pricing-route.js";
-import { pool, verifyDatabase } from "./lib/database.js";
+import { pool } from "./lib/database.js";
 import { runMarketSearch } from "./lib/market-search.js";
 import { createSearchApiMarketProvider, searchApiErrorForClient, SearchApiError, redactSearchApiSensitiveData } from "./lib/searchapi-market-provider.js";
 import { createFocusNFeClient, focusNFeErrorForClient, FocusNFeError, redactFocusNFeSensitiveData } from "./lib/focus-nfe-client.js";
@@ -45,8 +45,8 @@ if (!searchApiConfig.isConfigured) {
 }
 
 app.disable("x-powered-by");
-// Render terminates HTTPS before forwarding the request. Express must trust that
-// single proxy hop before it is allowed to issue a Secure session cookie.
+// Vercel forwards the original HTTPS protocol. Trust its proxy hop so Express
+// recognizes secure requests and can issue the Secure session cookie.
 if (config.secureCookie) app.set("trust proxy", 1);
 console.info(`[Session] store=PostgreSQL secure=${config.secureCookie} sameSite=lax trustProxy=${config.secureCookie}`);
 
@@ -517,17 +517,4 @@ app.use((error, req, res, next) => {
   return res.status(status).json(payload);
 });
 
-async function startServer() {
-  try {
-    await verifyDatabase();
-    app.listen(config.port, () => {
-      console.log(`Assistente de Precificação disponível em http://localhost:${config.port}`);
-    });
-  } catch (error) {
-    console.error(`[startup] Não foi possível iniciar o servidor (${error.code || "DATABASE_ERROR"}).`);
-    await pool.end();
-    process.exitCode = 1;
-  }
-}
-
-void startServer();
+export default app;

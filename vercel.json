@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm build",
+  "functions": {
+    "server.js": {
+      "includeFiles": "**/*.{html,csv}"
+    }
+  }
+}

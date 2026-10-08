@@ -16,7 +16,7 @@ async function request(path, options = {}) {
   const { method = "GET", body, handleUnauthorized = true, signal } = options;
   if (isGitHubPages() && (path.startsWith("/auth") || path.startsWith("/products") || path.startsWith("/market") || path.startsWith("/tax") || path.startsWith("/fiscal") || path.startsWith("/ai"))) {
     throw new ApiError(
-      "Este endereço do GitHub Pages exibe apenas a interface. Abra a URL da aplicação no Render para criar ou acessar sua conta.",
+      "Este endereço do GitHub Pages exibe apenas a interface. Abra a URL de produção da aplicação na Vercel para criar ou acessar sua conta.",
       503,
       "STATIC_HOSTING",
     );
@@ -25,7 +25,7 @@ async function request(path, options = {}) {
   try {
     response = await fetch(path, {
       method,
-      // API and interface share the Render domain. "include" also keeps the
+      // API and interface share the Vercel domain. "include" also keeps the
       // cookie explicit if this client is ever embedded by a same-site origin.
       credentials: "include",
       headers: body ? { "Content-Type": "application/json" } : undefined,

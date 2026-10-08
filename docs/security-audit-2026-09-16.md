@@ -39,7 +39,7 @@ Correção: requisições `POST`, `PUT`, `PATCH` e `DELETE` com origem cruzada s
 
 ### MEDIUM — validação TLS do PostgreSQL desativada — ação manual
 
-Em produção, `lib/database.js` usa TLS com `rejectUnauthorized: false`. A conexão fica criptografada, mas não autentica o certificado do servidor. A correção segura depende do certificado/CA e do modo de conexão oficialmente suportado pelo banco usado no Render; alterar esse valor sem esses dados pode indisponibilizar a aplicação.
+Em produção, `lib/database.js` usa TLS com `rejectUnauthorized: false`. A conexão fica criptografada, mas não autentica o certificado do servidor. A correção segura depende do certificado/CA e do modo de conexão oficialmente suportado pelo novo provedor PostgreSQL; alterar esse valor sem esses dados pode indisponibilizar a aplicação.
 
 Ação: obter a CA do provedor, testar uma conexão com verificação habilitada em ambiente de homologação e só então tornar a verificação obrigatória. Não versionar a CA se ela contiver material privado.
 
@@ -65,7 +65,7 @@ Correção: os logs usam somente comprimento, booleanos, contagens, status e có
 
 O rate limit da IA combina conta e IP e os demais endpoints possuem limites por IP, mas os contadores residem no processo. Em uma implantação com várias instâncias, cada processo teria sua própria janela.
 
-Ação: antes de escalar horizontalmente, mover rate limits que protegem custo/credenciais para um store compartilhado. No serviço atual de uma instância, os limites existentes permanecem ativos.
+Ação: na Vercel, as Functions podem escalar automaticamente. Mover rate limits que protegem custo/credenciais para um store compartilhado ou configurar regras equivalentes no Vercel Firewall antes de tratá-los como limites globais. Os limites atuais continuam ativos por instância.
 
 ## Controles verificados sem falha reproduzível
 
@@ -101,7 +101,7 @@ Ação: antes de escalar horizontalmente, mover rate limits que protegem custo/c
 ## Limitações e ações pós-deploy
 
 1. Reexecutar `pnpm audit --prod` em uma máquina cujo trust store valide `registry.npmjs.org`; nesta rodada o comando falhou com `UNABLE_TO_VERIFY_LEAF_SIGNATURE`. Não foi desativada a verificação TLS.
-2. Validar no Render, sem registrar cookies, um cadastro novo e outro já existente, login, troca de senha com duas sessões e bloqueio de `Origin` externo.
+2. Validar na Vercel, sem registrar cookies, um cadastro novo e outro já existente, login, troca de senha com duas sessões e bloqueio de `Origin` externo.
 3. Configurar e testar validação do certificado PostgreSQL antes de mudar `rejectUnauthorized`.
-4. Se o serviço ganhar múltiplas instâncias, usar um store compartilhado para rate limits.
+4. Usar um store compartilhado ou regra equivalente na plataforma para rate limits globais em múltiplas instâncias.
 5. Conferir `pnpm test`, `pnpm lint`, `pnpm build`, o bundle gerado e o commit efetivamente publicado.

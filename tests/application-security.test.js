@@ -240,7 +240,7 @@ test("sessão usa cookie defensivo, autenticação regenera SID e arquivos priva
   assert.doesNotMatch(serverSource, /express\.static/);
 
   const publicFiles = between(serverSource, 'app.get(["/", "/index.html"]', "function isDatabaseError(");
-  for (const path of [".env", ".git", "render.yaml", "package.json", "README.md"]) {
+  for (const path of [".env", ".git", "vercel.json", "package.json", "README.md"]) {
     assert.equal(publicFiles.includes(path), false);
   }
 });

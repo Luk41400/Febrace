@@ -170,7 +170,8 @@ O cálculo da simulação acontece no navegador para atualizar a interface imedi
 
 | Arquivo ou diretório | Responsabilidade |
 | --- | --- |
-| [server.js](server.js) | Servidor Express, rotas, sessão, autenticação, rate limits, arquivos públicos e inicialização. |
+| [server.js](server.js) | Aplicação Express exportada para a Vercel: rotas, sessão, autenticação, rate limits e HTML. |
+| [start.js](start.js) | Verificação do banco e listener HTTP somente para `pnpm start`/`pnpm dev` locais. |
 | [lib/config.js](lib/config.js) | Leitura e validação das variáveis de ambiente. |
 | [lib/database.js](lib/database.js) | Pool PostgreSQL e verificação da conexão e tabelas no startup. |
 | [lib/validation.js](lib/validation.js) | Schemas Zod dos contratos de autenticação, produto, mercado e fiscal. |
@@ -192,7 +193,7 @@ O cálculo da simulação acontece no navegador para atualizar a interface imedi
 | [tests/](tests/) | Testes de domínio, contrato, UI, providers, persistência e fluxos. |
 | [data/ibpt/](data/ibpt/) | Arquivo de referência tributária utilizado pelo provider local. |
 | [docs/](docs/) | Guias específicos de IA, SearchAPI, Focus NFe e IBPT. |
-| [render.yaml](render.yaml) | Blueprint do Web Service e do PostgreSQL no Render. |
+| [vercel.json](vercel.json) | Build e inclusão explícita do HTML e CSV IBPT na Function Express da Vercel. |
 | [docker-compose.yml](docker-compose.yml) | Banco PostgreSQL para desenvolvimento local; a aplicação Node é iniciada separadamente. |
 | [.env.example](.env.example) | Nomes de variáveis e exemplos sem credenciais reais. |
 | [pnpm-lock.yaml](pnpm-lock.yaml) | Versões resolvidas das dependências para instalações com pnpm. |
@@ -377,10 +378,10 @@ Cancelar, editar a mensagem, encerrar sessão, resetar a consulta ou reutilizar 
 
 ## Pré-requisitos
 
-- Node.js 20 ou superior.
+- Node.js 24.x.
 - PostgreSQL 14 ou superior, ou Docker Desktop com Docker Compose.
 
-O Blueprint atualmente declara `NODE_VERSION=20`; a rodada de validação da implementação de IA usou Node `24.19.0` localmente. Confira `node --version` em um novo dispositivo: o script de testes usa `--test-isolation=none`, e o runtime escolhido precisa aceitar essa opção. Não trate a configuração declarada do deploy como prova de que todos os comandos de desenvolvimento foram executados naquela mesma versão.
+`package.json` fixa Node 24.x para o deploy. Confira `node --version` em um novo dispositivo: o script de testes usa `--test-isolation=none`, e o runtime local também precisa aceitar essa opção.
 
 ## Configuração local com Docker (recomendada)
 
@@ -430,11 +431,11 @@ Para origem nacional, a alíquota federal vem de `nacionalfederal`; para importa
 
 O botão **Preencher com IA** abre uma descrição livre e mostra campos e pendências antes de **Aplicar ao simulador**. O provedor padrão é Gemini, modelo `gemini-3.5-flash-lite`, com saída estruturada por JSON Schema. Com `AI_FILL_MODE=complete`, cada valor é classificado como `user_provided`, `inferred` ou `estimated`; a prévia separa essas origens e avisa que sugestões podem ser ajustadas. A rota autenticada `POST /ai/parse-pricing` recebe `message`, percentuais atuais e um conjunto estrito de inputs válidos já presentes. Somente `message` chega à Gemini: o backend usa `currentFields` para preservar valores manuais no lugar de estimativas. No esclarecimento, recebe também contexto efêmero, origens, campos anteriores validados e pendências, sem dados da conta ou credenciais. Apenas o controlador atual aplica o patch e chama o cálculo existente. Esclarecimentos ficam em memória no modal e não são salvos no banco.
 
-Configure `GEMINI_API_KEY` exclusivamente no backend. Os padrões são `AI_PROVIDER=gemini`, `AI_MODEL=gemini-3.5-flash-lite`, `AI_FILL_MODE=complete` e `AI_TIMEOUT_MS=25000`. No Render, abra o **Web Service → Environment → Add Environment Variable**, adicione a chave e substitua também valores antigos explícitos: variáveis do serviço prevalecem sobre os padrões novos. Depois use **Manual Deploy → Deploy latest commit**. A declaração `sync: false` no Blueprint não preenche o segredo de um serviço existente. `OPENAI_API_KEY` não é mais necessária em nenhuma funcionalidade deste projeto e pode ser removida do ambiente.
+Configure `GEMINI_API_KEY` exclusivamente nas variáveis de ambiente do projeto Vercel. Os padrões são `AI_PROVIDER=gemini`, `AI_MODEL=gemini-3.5-flash-lite`, `AI_FILL_MODE=complete` e `AI_TIMEOUT_MS=25000`. Variáveis explícitas no painel prevalecem sobre esses padrões; revise valores antigos ao importar o projeto. `OPENAI_API_KEY` não é mais necessária em nenhuma funcionalidade deste projeto.
 
 Sem configuração ou durante falhas externas, o simulador manual continua funcionando. Há limites de oito análises por minuto por conta e por IP, com uma análise simultânea por conta. A aplicação não salva conversas nem registra a mensagem em logs. Consulte [docs/ai-assistant.md](docs/ai-assistant.md) para os campos, limites, arquitetura e roteiro de teste.
 
-O diagnóstico `ai` em `/health` informa `provider`, `configured`, modelo, timeout, versão/método REST, contrato estruturado e `configurationErrors`; `deployment.commit` expõe somente o SHA validado fornecido pelo Render. Não há segredos nem chamada paga. Configuração aceita não comprova credencial válida ou créditos disponíveis. O backend diferencia ausência de configuração, autenticação/permissão do provedor, modelo indisponível, requisição/schema rejeitado, quota, rate limit, timeout e resposta inválida. No Shell do Render, `pnpm gemini:check` confirma a disponibilidade do modelo para a conta, o suporte a `generateContent` e uma geração estruturada com o caso de lote; a geração consome quota. O roteiro completo e a tabela de erros estão em [Diagnóstico no Render](docs/ai-assistant.md#diagnóstico-no-render).
+O diagnóstico `ai` em `/health` informa `provider`, `configured`, modelo, timeout, versão/método REST, contrato estruturado e `configurationErrors`; `deployment.commit` expõe somente o SHA validado de `VERCEL_GIT_COMMIT_SHA`. Não há segredos nem chamada paga. Configuração aceita não comprova credencial válida ou créditos disponíveis. O backend diferencia ausência de configuração, autenticação/permissão do provedor, modelo indisponível, requisição/schema rejeitado, quota, rate limit, timeout e resposta inválida. Em um terminal local configurado, `pnpm gemini:check` confirma a disponibilidade do modelo para a conta e faz gerações estruturadas que consomem quota. O roteiro completo e a tabela de erros estão em [Diagnóstico na Vercel](docs/ai-assistant.md#diagnóstico-na-vercel).
 
 O payload validado usa `temperature: 0`, `generationConfig.responseMimeType: "application/json"` e `generationConfig.responseJsonSchema`. `responseFormat` e `responseSchema` não são enviados juntos. O schema externo não contém `maxItems`, porque a combinação do limite 35 com o enum de 35 campos foi rejeitada por complexidade pela Gemini; o backend limita a 100 entries para comportar componentes repetidos sem permitir resposta ilimitada. Cada entry declara base, certeza e evidências; a validação posterior continua rigorosa. Em follow-up, o mesmo contrato estruturado permanece ativo, mas o enum `field` contém somente os campos que ainda estão pendentes.
 
@@ -446,7 +447,7 @@ A referência editável é [.env.example](.env.example), e a interpretação efe
 | --- | --- | --- |
 | `DATABASE_URL` | Conexão PostgreSQL da aplicação | Obrigatória para iniciar o servidor e executar migrations. |
 | `SESSION_SECRET` | Assinatura das sessões | Obrigatória, com pelo menos 32 caracteres; não versionar o valor real. |
-| `PORT` | Porta HTTP | Padrão local `3000`. |
+| `PORT` | Porta HTTP local | Padrão `3000`; não cadastrar na Vercel. |
 | `NODE_ENV` | Ambiente de execução | Afeta seleção padrão da Focus, cookie seguro e conexão do banco. |
 | `SESSION_COOKIE_SECURE` | Cookie restrito a HTTPS | `false` no localhost HTTP; produção ativa cookie seguro. |
 | `POSTGRES_DB` | Banco criado pelo Docker Compose local | Precisa corresponder à conexão local pretendida. |
@@ -465,28 +466,28 @@ A referência editável é [.env.example](.env.example), e a interpretação efe
 
 Ao copiar `.env.example`, o token fictício de Focus não se torna uma credencial válida. Configure um token real de homologação ou deixe `FOCUS_NFE_TOKEN` vazio para desenvolver sem essa consulta. Não use um teste de “variável presente” como confirmação de que a API está operacional.
 
-O `.env` local e as variáveis do Web Service no Render são configurações independentes. Alterar uma delas não altera automaticamente a outra. A declaração `sync: false` no Blueprint indica que um segredo precisa ser fornecido; não contém nem recupera a chave por conta própria.
+O `.env` local e as variáveis do projeto Vercel são configurações independentes. Alterar uma delas não altera automaticamente a outra. Cadastre os segredos somente em **Project Settings → Environment Variables**; não os inclua no Git nem em `vercel.json`.
 
-## Publicação a partir do GitHub
+## Deploy pela Vercel
 
-**Não publique este projeto no GitHub Pages.** Ele serve apenas HTML, CSS e JavaScript estáticos: não executa `server.js`, não mantém sessões nem conecta ao PostgreSQL. Por isso as chamadas `GET /auth/me` retornam `404` e os `POST /auth/login` e `POST /auth/register` retornam `405` no Pages. Além disso, o GitHub não recomenda o Pages para sites que recebem senhas.
+A Vercel detecta `server.js` como aplicação Express e importa o `app` exportado. Em produção, uma Function com Fluid Compute atende HTML e API na mesma origem; no desenvolvimento local, `start.js` verifica o PostgreSQL e abre a porta `3000`. `vercel.json` executa `pnpm build` e inclui `index.html` e o CSV IBPT no bundle da Function. O build também copia os assets públicos para `public/`, que a Vercel serve pela CDN. Não há React, Next.js, segundo servidor ou CORS.
 
-O repositório contém [`render.yaml`](render.yaml), que publica a aplicação completa — interface, API e banco — no mesmo domínio. Isso preserva a autenticação por cookie seguro e dispensa CORS.
+Referências oficiais: [Express na Vercel](https://vercel.com/docs/frameworks/backend/express), [pool PostgreSQL em Fluid Compute](https://vercel.com/kb/guide/efficiently-manage-database-connection-pools-with-fluid-compute), [Node.js 24](https://vercel.com/docs/functions/runtimes/node-js/node-js-versions) e [variáveis de sistema](https://vercel.com/docs/environment-variables/system-environment-variables).
 
-1. Envie todos os arquivos para um repositório GitHub, incluindo `render.yaml`, mas excluindo `.env`.
-2. No Render, escolha **New → Blueprint**, conecte o repositório e confirme os recursos propostos.
-3. O serviço cria o PostgreSQL, injeta `DATABASE_URL`, gera `SESSION_SECRET`, executa `npm run migrate` antes de cada publicação e inicia `npm start`.
-4. Configure no Web Service um `FOCUS_NFE_TOKEN` de produção. O Blueprint já seleciona `https://api.focusnfe.com.br` e o backend registra apenas `configured=true/false`, nunca o token.
-5. Para habilitar a pesquisa de mercado, preencha manualmente `SEARCHAPI_API_KEY` no Web Service. O Blueprint define `SEARCHAPI_TIMEOUT_MS=15000`; a existência de `sync: false` não preenche o segredo.
-6. Abra a URL `https://…onrender.com` fornecida pelo Render. Essa é a URL que deve ser compartilhada e usada para criar contas.
+1. Envie este projeto ao GitHub sem `.env` ou segredos. Ao importar o repositório em **Vercel → Add New → Project**, escolha como **Root Directory** a pasta que contém `package.json`, `server.js` e `vercel.json`. Se o repositório tiver esta pasta na raiz, deixe a raiz padrão.
+2. Confirme o preset **Express** e Node.js **24.x**. `package.json` fixa `engines.node=24.x`; não configure build ou output directory antigos no painel. O `buildCommand` do repositório é `pnpm build`, e o lockfile seleciona pnpm.
+3. Configure um PostgreSQL compatível por integração do [Vercel Marketplace](https://vercel.com/marketplace?category=databases) ou por provedor externo. Cadastre a conexão em `DATABASE_URL` no ambiente correto. Mantenha o banco acessível à região da Function e respeite o limite de conexões do provedor; cada instância Vercel pode manter seu próprio pool.
+4. Em **Project Settings → Environment Variables**, cadastre `DATABASE_URL` e uma `SESSION_SECRET` aleatória com pelo menos 32 caracteres. Defina `NODE_ENV=production` e `SESSION_COOKIE_SECURE=true` em Production. Cadastre `FOCUS_NFE_TOKEN`, `SEARCHAPI_API_KEY` e `GEMINI_API_KEY` somente se essas integrações forem usadas. Ajuste, se necessário, `FOCUS_NFE_BASE_URL=https://api.focusnfe.com.br`, `FOCUS_NFE_TIMEOUT_MS=5000`, `SEARCHAPI_TIMEOUT_MS=15000`, `AI_PROVIDER=gemini`, `AI_MODEL=gemini-3.5-flash-lite`, `AI_FILL_MODE=complete` e `AI_TIMEOUT_MS=25000`. Não cadastre `PORT` na Vercel. Ative **Enable access to System Environment Variables** para disponibilizar `VERCEL_GIT_COMMIT_SHA` e os metadados usados pelo ciclo de vida do pool.
+5. Crie uma Preview Deployment de uma branch com `DATABASE_URL` e `SESSION_SECRET` **isoladas da produção**, além de `NODE_ENV=production` e `SESSION_COOKIE_SECURE=true` para testar o mesmo comportamento de cookie HTTPS. Execute `pnpm migrate` somente contra esse banco de Preview, se ele for novo. Teste `/`, `/index.html`, CSS, JavaScript, `/health`, `/auth/me` sem sessão, cadastro/login/logout, `/products` e as integrações habilitadas. `/health` deve mostrar `database: "connected"` e `taxEstimate.configured: true`.
+6. Prepare o banco de produção e execute `pnpm migrate` em um terminal ou pipeline controlado apontando para a `DATABASE_URL` de produção; confira `schema_migrations` e as tabelas antes de liberar a versão. **Não** inclua `pnpm migrate` no Build Command, em Preview automática ou em `postinstall`.
+7. Para o primeiro release, publique a branch de produção somente após a migração e os testes de Preview. Para releases futuros com migrations, use uma implantação Production preparada sem atribuição automática do domínio, verifique o banco e então promova o deployment; configure no painel o bloqueio de atribuição automática de domínios ou Deployment Checks antes de usar esse fluxo. Uma promoção direta de Preview para Production gera novo build com variáveis de Production, então valide a versão de Production antes de apontar o domínio.
+8. Na URL **Production** atribuída pela Vercel, confirme `/health`, carregamento dos assets, `Set-Cookie` com `HttpOnly`, `Secure` e `SameSite=Lax`, persistência de login em `/auth/me`, logout, revogação de sessões após troca de senha, leitura e gravação no PostgreSQL, IBPT, Focus NFe, SearchAPI e Gemini conforme configuradas. Não publique a URL temporária de Preview como endereço permanente.
 
-Em um serviço Render já existente, abra **Environment**, confira `SEARCHAPI_API_KEY` e escolha **Save Changes**. Em seguida execute **Manual Deploy → Deploy latest commit**. Nunca grave o valor no GitHub ou no frontend.
+O banco de produção antigo do Render **não é migrado pelo deploy do código**. Preserve-o enquanto transfere os dados. Para trocar de provedor, interrompa escritas, faça backup consistente com `pg_dump`, restaure em um PostgreSQL novo compatível com `pg_restore`/`psql`, execute `pnpm migrate` no destino e confira schema, `schema_migrations`, usuários, produtos, histórico e `user_sessions`. A mudança de domínio exige novo login mesmo se a tabela de sessões for copiada, pois o cookie antigo pertence ao domínio anterior. Só altere `DATABASE_URL` em Production e libere tráfego após validar o banco novo; mantenha o backup e o banco antigo até concluir a conferência. Nenhuma credencial ou dado real deve entrar no repositório.
 
-O endereço configurado no redirecionamento do projeto é [fecart-2026.onrender.com](https://fecart-2026.onrender.com/), e o repositório utilizado é [GustavoL266/Fecart-2026](https://github.com/GustavoL266/Fecart-2026). Essas referências identificam a configuração do código; este README não verifica continuamente disponibilidade, credenciais, configuração de auto deploy ou status dos serviços.
+Os rate limits atuais usam memória por instância. A Vercel pode executar várias instâncias, portanto os limites não são globais. Antes de confiar neles como orçamento global de tentativas ou de chamadas pagas, configure um store compartilhado compatível com `express-rate-limit` ou regras equivalentes no Vercel Firewall; as verificações de autenticação, origem e sessão continuam ativas por requisição. O pool `pg` é criado uma vez por instância e `attachDatabasePool` libera conexões ociosas antes da suspensão da Function.
 
-O Blueprint executa `npm install && npm run build`, usa `npm run migrate` como etapa anterior ao deploy e inicia com `npm start`. O comando de migration é declarado no arquivo; ao configurar ou alterar o serviço, confira se as etapas previstas estão habilitadas no ambiente efetivamente usado. Um commit no GitHub não comprova que a nova versão terminou de subir no Render.
-
-Não é preciso (nem correto) colocar credenciais no GitHub, no código ou no GitHub Pages. Se o Pages já estiver ativo no repositório, desative-o em **Settings → Pages** para evitar que usuários cheguem à cópia estática sem API.
+**Mantenha o GitHub Pages desativado** em **Settings → Pages**: ele só publica arquivos estáticos e não executa `server.js`, sessões ou PostgreSQL. O antigo redirecionamento fixo de Pages foi removido porque o domínio final de Production ainda não está definido no repositório. `file://` continua redirecionando para `http://localhost:3000/`; se um domínio oficial for escolhido depois, publique apenas a URL estável de Production.
 
 ## Diagnóstico de inicialização
 
@@ -497,12 +498,12 @@ O frontend e a API são servidos pelo mesmo processo; não há um segundo servid
 - `MIGRATIONS_PENDING`: execute `npm run migrate` (ou `pnpm migrate`) antes de iniciar a aplicação.
 - `market.configured: false` no `/health`: confira se `SEARCHAPI_API_KEY` foi configurada no backend. O endpoint nunca mostra a chave.
 - `ai.configured: false` no `/health`: consulte `ai.configurationErrors`. `GEMINI_API_KEY_MISSING` significa que a chave não foi cadastrada no backend desse ambiente. Confira também `AI_PROVIDER`, `AI_MODEL`, `AI_FILL_MODE` e `AI_TIMEOUT_MS`; não altere segredos de sessão para corrigir a IA.
-- IA configurada, mas análise falha: compare `ai.model`, `ai.timeoutMs` e `deployment.commit`; depois cruze o JSON seguro da rota com `[AI] upstreamStatus`, `[AI] upstreamErrorCode` e `[AI] upstreamErrorStatus`. Nenhuma mensagem, chave, cabeçalho ou corpo de resposta é registrado. Execute uma vez `pnpm gemini:check` no Shell do Render para verificar conta, método e geração estruturada. Consulte a tabela em [docs/ai-assistant.md](docs/ai-assistant.md#códigos-de-erro).
+- IA configurada, mas análise falha: compare `ai.model`, `ai.timeoutMs` e `deployment.commit`; depois cruze o JSON seguro da rota com `[AI] upstreamStatus`, `[AI] upstreamErrorCode` e `[AI] upstreamErrorStatus`. Nenhuma mensagem, chave, cabeçalho ou corpo de resposta é registrado. Execute uma vez `pnpm gemini:check` em um terminal controlado com a configuração desse ambiente para verificar conta, método e geração estruturada. Consulte a tabela em [docs/ai-assistant.md](docs/ai-assistant.md#códigos-de-erro).
 - `/auth/me` 401 no carregamento sem sessão é a checagem inicial que abre o login. Se ocorrer após autenticar, confira a ordem das requisições e o envio do cookie sem expor seu valor. Somente `SESSION_REQUIRED` encerra a sessão no frontend; 401 externo não deve deslogar. O bootstrap descarta respostas/tentativas antigas após mudança de autenticação.
 - `market.configured: true` confirma somente que a variável existe. Depois de uma pesquisa, consulte os logs `[Market] Status` e `[Market] Results` para distinguir credencial inválida (`401`), falta de permissão (`403`), limite (`429`) e falha externa (`5xx`).
 - `taxEstimate.configured: false` no `/health`: confira se `data/ibpt/TabelaIBPTaxSP26.2.A.csv` foi incluído sem conversão. `errorCode` distingue arquivo ausente de arquivo inválido.
 
-Na inicialização, o servidor testa a conexão com o PostgreSQL e confirma que as tabelas exigidas existem. Assim, uma configuração incompleta aparece no terminal com a causa concreta, em vez de falhar apenas ao enviar o formulário.
+Em `pnpm start` local, o servidor testa a conexão com o PostgreSQL e confirma que as tabelas exigidas existem. Na Vercel, o app é importado sem listener; `/health` testa a conexão e uma migration ausente precisa ser corrigida antes da promoção.
 
 ## Configuração com PostgreSQL já instalado
 
@@ -596,7 +597,7 @@ Um banco local recém-criado começa vazio. Dados de produção não fazem parte
 | PATCH | `/products/:id` | Obrigatória + dono |
 | DELETE | `/products/:id` | Obrigatória + dono |
 
-O frontend sempre envia cookies com `credentials: "include"`. Em produção, o Render usa o mesmo domínio para interface e API, cookie `Secure`, `SameSite=Lax`, `HttpOnly`, sessão no PostgreSQL e `trust proxy` para o único proxy do Render. A API nunca retorna `password_hash` e utiliza parâmetros do PostgreSQL em todas as queries.
+O frontend sempre envia cookies com `credentials: "include"`. Em produção, a Vercel usa o mesmo domínio para interface e API, cookie `Secure`, `SameSite=Lax`, `HttpOnly`, sessão no PostgreSQL e `trust proxy=1` para reconhecer `x-forwarded-proto: https`. A API nunca retorna `password_hash` e utiliza parâmetros do PostgreSQL em todas as queries.
 
 ## Verificação manual do fluxo
 
@@ -682,11 +683,11 @@ Esse texto ajuda a solicitar a leitura do contexto explicitamente, sem depender 
 | NCM e classificação | Módulos de classificação, `lib/focus-nfe-client.js`, rotas fiscais | Preserve confirmação explícita, relevância e vínculo à consulta atual. |
 | Card IBPT | `lib/ibpt-tax-provider.js`, `js/services/tax-service.js`, `js/ui/dashboard.js` | Confira origem, código exato, arquivo, vigência e invalidação do resultado anterior. |
 | IA | `lib/ai-*`, `lib/gemini-form-provider.js`, `js/ui/ai-assistant.js`, `js/ui/form.js` | Valide extração, origem, estimativas e prévia; mantenha credenciais no backend e cálculo fora do modelo. |
-| Autenticação/deploy | `server.js`, `lib/config.js`, `lib/database.js`, `render.yaml` | Confira ambiente real, sessão PostgreSQL, cookie e proxy sem expor credenciais. |
+| Autenticação/deploy | `server.js`, `lib/config.js`, `lib/database.js`, `vercel.json` | Confira ambiente real, sessão PostgreSQL, cookie e proxy sem expor credenciais. |
 
 ### Contratos que precisam continuar coerentes
 
-**DOM e bundle.** Os seletores usados em `js/main.js` dependem dos IDs em `index.html`. Renomear ou remover um elemento exige atualizar todos os consumidores e os testes de contrato. Novos módulos frontend precisam entrar no build; novos arquivos públicos precisam de rota no servidor.
+**DOM e bundle.** Os seletores usados em `js/main.js` dependem dos IDs em `index.html`. Renomear ou remover um elemento exige atualizar todos os consumidores e os testes de contrato. Novos módulos frontend precisam entrar no build; novos assets públicos precisam entrar na lista de cópia de `scripts/build.mjs` e, para uso local, ter rota no servidor.
 
 **Porcentagens.** Não misture `25` com `0.25`. O formulário e o patch IA usam a escala visível; o motor usa frações. Um ajuste aparentemente pequeno nessa conversão pode alterar todos os resultados.
 
@@ -767,7 +768,7 @@ Na auditoria de segurança de 16/09/2026, passaram **389 testes**, lint de 87 ar
 
 Na correção do salvamento sem referência de mercado em 17/09/2026, passaram **395 testes**, lint de 88 arquivos JavaScript e build. O frontend passou a omitir `pricing.market.rule` quando não existe referência ativa e a converter o estado histórico interno `none` para o fallback visual manual, sem enviar string vazia. O backend continua aceitando somente ausência ou `manual`, `selected-product`, `market-average` e `market-median`; valores vazios ou arbitrários continuam retornando 400. Um POST HTTP local com margem de 10% confirmou status 201, preço de mercado nulo e a identificação “Sem referência de mercado”.
 
-Os testes automatizados de APIs usam respostas simuladas e não demonstram a disponibilidade das credenciais de produção. A chamada real descrita acima usou exclusivamente o `.env` local e comprova o contrato e o acesso nessa conta, não as variáveis do serviço Render. Após o deploy, execute uma vez `pnpm gemini:check` no Shell do serviço para validar a conta de produção. Um resultado com mocks precisa ser relatado como tal. Capturas, navegadores temporários e relatórios locais de uma sessão não devem ser presumidos disponíveis em outro clone.
+Os testes automatizados de APIs usam respostas simuladas e não demonstram a disponibilidade das credenciais de produção. A chamada real descrita acima usou exclusivamente o `.env` local e comprova o contrato e o acesso nessa conta, não as variáveis da Vercel. Após o deploy, execute uma vez `pnpm gemini:check` em ambiente controlado com a configuração de produção para validar essa conta. Um resultado com mocks precisa ser relatado como tal. Capturas, navegadores temporários e relatórios locais de uma sessão não devem ser presumidos disponíveis em outro clone.
 
 Para alterações de código, execute os scripts pertinentes e depois confira o bundle final. Para uma alteração somente documental, revise conteúdo, links e diff; não é necessário modificar arquivos gerados só para registrar a edição do README.
 
@@ -780,7 +781,7 @@ Para alterações de código, execute os scripts pertinentes e depois confira o 
 - **IA:** há validação estrutural e de evidências, mas a interpretação semântica pode falhar. A prévia e a confirmação fazem parte do produto e não devem ser removidas por conveniência.
 - **Escala:** os contadores de limite da IA e caches de providers usam memória do processo. Várias instâncias exigem reavaliar armazenamento compartilhado, limites globais e deduplicação; a sessão de autenticação já fica no PostgreSQL.
 - **Build:** a concatenação atual exige cuidado com nomes globais e ordem dos módulos. Não presuma capacidades de um bundler mais completo.
-- **Ambiente:** o repositório não comprova o plano ativo do Render, o sucesso do último deploy, o estado das chaves ou o conteúdo do banco remoto.
+- **Ambiente:** o repositório não comprova o plano ativo da Vercel, o sucesso do último deploy, o estado das chaves ou o conteúdo do banco remoto.
 - **Documentação:** referências a decisões antigas precisam ser confrontadas com os módulos e testes atuais. Se um comportamento mudar, atualize o contexto para que o próximo dispositivo receba a decisão correta.
 
 ### Guias complementares
@@ -790,4 +791,4 @@ Para alterações de código, execute os scripts pertinentes e depois confira o 
 - [Focus NFe: pesquisa e confirmação de NCM](docs/focus-nfe.md)
 - [IBPT: fonte, arquivo, estimativa e limitações](docs/ibpt.md)
 
-Ao concluir uma tarefa, registre quais arquivos e comportamentos mudaram, quais verificações foram executadas e o que depende de configuração externa. Se houver publicação pendente, diferencie claramente **alteração local**, **commit enviado ao GitHub** e **deploy concluído no Render**.
+Ao concluir uma tarefa, registre quais arquivos e comportamentos mudaram, quais verificações foram executadas e o que depende de configuração externa. Se houver publicação pendente, diferencie claramente **alteração local**, **commit enviado ao GitHub** e **deploy concluído na Vercel**.

@@ -12,7 +12,7 @@ O assistente interpreta uma mensagem, completa os inputs necessários com hipót
 | `AI_FILL_MODE` | `complete` sugere todos os inputs obrigatórios; `partial` somente extrai | `complete` |
 | `AI_TIMEOUT_MS` | Tempo máximo da chamada, inteiro de 100 a 60000 ms | `25000` |
 
-Localmente, configure no `.env`, que já é ignorado pelo Git. No Render, abra o Web Service do projeto, **Environment → Add Environment Variable**, cadastre `GEMINI_API_KEY` com sua chave real e salve. Em serviços existentes, substitua os valores antigos de `AI_PROVIDER` e `AI_MODEL` pelos da tabela. Depois faça **Manual Deploy → Deploy latest commit**. Nunca grave a chave no frontend, no GitHub ou neste documento. Uma configuração ausente ou inválida desabilita apenas o assistente.
+Localmente, configure no `.env`, que já é ignorado pelo Git. Na Vercel, cadastre `GEMINI_API_KEY` em **Project Settings → Environment Variables** para o ambiente desejado e revise valores explícitos de `AI_PROVIDER` e `AI_MODEL`. Nunca grave a chave no frontend, no GitHub ou neste documento. Uma configuração ausente ou inválida desabilita apenas o assistente.
 
 O provedor usa REST nativo via `fetch` do Node, sem SDK ou camada de compatibilidade OpenAI. A chamada é `POST https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent`. A chave vai somente no cabeçalho `x-goog-api-key`, nunca na URL. O contrato usa `systemInstruction`, uma mensagem em `contents`, `generationConfig.responseMimeType: "application/json"` e `generationConfig.responseJsonSchema`. A extração usa `temperature: 0`, um candidato e limite de 3000 tokens. O schema exige `source` em cada entry, com `user_provided`, `inferred` ou `estimated`. A primeira análise não envia histórico nem os inputs atuais à Gemini; um esclarecimento envia somente contexto efêmero, campos/origens anteriores validados, perguntas pendentes controladas e a resposta atual, sem ferramentas, formulário completo ou dados da conta. A pergunta controlada faz parte do significado do segundo turno: se a única pendência for a quantidade mensal, uma resposta numérica curta é mensal; diante de uma pergunta de rendimento do lote, o mesmo número é apenas o divisor daquele lote.
 
@@ -20,13 +20,13 @@ O modelo estável [Gemini 3.5 Flash-Lite](https://ai.google.dev/gemini-api/docs/
 
 O schema externo usa somente recursos documentados: `object`, `array`, `string`, `number`, `integer`, `null`, união de tipos para nulabilidade, `required`, `enum`, `items` e `additionalProperties: false`. Ele omite deliberadamente `maxItems`: a chamada real retornou 400 quando `maxItems: 35` era combinado com o enum de 35 campos. A validação Zod rigorosa do backend limita o array a 100 entradas — permitindo componentes do mesmo campo sem deixar a resposta ilimitada — e continua sendo a autoridade para evidências, normalização, limites e campos aceitos.
 
-Esta funcionalidade agora depende exclusivamente de `GEMINI_API_KEY`. `OPENAI_API_KEY`, `AI_PROVIDER=openai` e o modelo anterior não são usados. Em um serviço Render existente, **troque também AI_PROVIDER e AI_MODEL**, pois variáveis antigas explícitas prevalecem sobre os novos padrões. Depois de migrar, a antiga chave OpenAI pode ser removida do ambiente deste projeto.
+Esta funcionalidade depende exclusivamente de `GEMINI_API_KEY`. `OPENAI_API_KEY`, `AI_PROVIDER=openai` e o modelo anterior não são usados. Variáveis antigas explícitas prevalecem sobre os padrões; configure `AI_PROVIDER=gemini` e `AI_MODEL=gemini-3.5-flash-lite` na Vercel quando houver valores anteriores. A antiga chave OpenAI pode ser removida do ambiente deste projeto.
 
-### Diagnóstico no Render
+### Diagnóstico na Vercel
 
-Sem `GEMINI_API_KEY`, `getAiAssistantConfig().isConfigured` é falso, `createAiFormProvider` retorna `null` e a rota autenticada retorna `503 GEMINI_NOT_CONFIGURED` **antes de chamar a Gemini**. O antigo incidente de configuração envolvia o provedor OpenAI anterior à migração; não é evidência sobre a configuração atual da Gemini no Render.
+Sem `GEMINI_API_KEY`, `getAiAssistantConfig().isConfigured` é falso, `createAiFormProvider` retorna `null` e a rota autenticada retorna `503 GEMINI_NOT_CONFIGURED` **antes de chamar a Gemini**. O antigo incidente de configuração envolvia o provedor OpenAI anterior à migração; não é evidência sobre a configuração atual da Gemini.
 
-Para habilitar a análise, configure no **Render → fecart-2026 → Environment**:
+Para habilitar a análise, configure no ambiente correspondente da Vercel:
 
 ```text
 GEMINI_API_KEY=<informar o segredo somente no painel>
@@ -36,7 +36,7 @@ AI_FILL_MODE=complete
 AI_TIMEOUT_MS=25000
 ```
 
-`render.yaml` já declara a chave com `sync: false`; isso não cadastra o segredo em um serviço existente. Não troque `SESSION_SECRET` nem `DATABASE_URL` para corrigir a IA. Mantenha `NODE_ENV=production` e `SESSION_COOKIE_SECURE=true`, como previsto no Blueprint. Salve a configuração e publique o commit atualizado com **Manual Deploy → Deploy latest commit**.
+Cadastre o segredo somente no painel. Não troque `SESSION_SECRET` nem `DATABASE_URL` para corrigir a IA. Em Production, mantenha `NODE_ENV=production` e `SESSION_COOKIE_SECURE=true`; publique a versão após verificar a configuração e as migrations aplicáveis.
 
 Depois do deploy, `GET /health` inclui:
 
@@ -54,7 +54,7 @@ Depois do deploy, `GET /health` inclui:
     "configurationErrors": ["GEMINI_API_KEY_MISSING"]
   },
   "deployment": {
-    "commit": "<sha de 40 caracteres ou null fora do Render>"
+    "commit": "<sha de 40 caracteres ou null sem metadados Vercel>"
   }
 }
 ```
@@ -63,7 +63,7 @@ Quando as variáveis forem aceitas, `configured` será `true` e `configurationEr
 
 O log de inicialização `[AI] Configuration` mostra o mesmo diagnóstico seguro e `[Deploy] Configuration` mostra somente o SHA validado. Cada análise recebe um `requestId` UUID próprio para correlação, sem vínculo com conta ou conteúdo. Em falha HTTP da Gemini são registrados somente `[AI] upstreamStatus`, `[AI] upstreamErrorCode` e `[AI] upstreamErrorStatus`. O fluxo também registra os booleanos seguros `clarification`, `previousAnalysisPresent`, `parseSuccess`, `mergeSuccess` e `validationSuccess`. Uma validação recusada inclui somente caminho do campo, tipo e código interno. Mensagens livres do provedor são descartadas. Análises válidas registram `provider=gemini` e `status=200`. Nunca são registrados o objeto de erro original, stack, cabeçalhos, prompt, resposta bruta ou texto do usuário.
 
-Para comprovar a disponibilidade na conta e o contrato real, abra o **Shell** do Web Service depois do deploy e execute:
+Para comprovar a disponibilidade na conta e o contrato real, execute em um terminal controlado com as variáveis do ambiente desejado:
 
 ```text
 pnpm gemini:check
@@ -75,7 +75,7 @@ O comando faz primeiro um `GET /v1beta/models/{AI_MODEL}` sem prompt e confirma 
 
 ### Incidente HTTP 502 de 11/09/2026
 
-No momento da investigação, `https://fecart-2026.onrender.com/health` respondeu `200`, banco conectado e `ai.provider: "gemini"`, `ai.configured: true`, sem erros locais de configuração. O `app.js` publicado tinha o mesmo SHA-256 do bundle do commit então presente no repositório. Isso comprova o frontend publicado e que a aplicação aceitou presença/formato das variáveis, mas não comprova a chave, a conta, o modelo efetivo anterior a este diagnóstico nem o backend exato sem um SHA publicado.
+No momento da investigação no serviço anterior, `/health` respondeu `200`, banco conectado e `ai.provider: "gemini"`, `ai.configured: true`, sem erros locais de configuração. O `app.js` publicado tinha o mesmo SHA-256 do bundle do commit então presente no repositório. Isso comprova o frontend publicado naquela ocasião e que a aplicação aceitou presença/formato das variáveis, mas não comprova a chave, a conta, o modelo efetivo anterior a este diagnóstico nem o backend exato sem um SHA publicado.
 
 A resposta real de produção confirmou `502 GEMINI_BAD_REQUEST`. O probe autenticado com `gemini-3.5-flash-lite` reproduziu duas rejeições independentes: `responseFormat.text.mimeType: "application/json"` retornou 400 `INVALID_ARGUMENT`, e o schema já migrado ainda retornou 400 enquanto continha `entries.maxItems: 35` junto do enum de 35 campos. `responseMimeType + responseJsonSchema` mínimo retornou 200; o schema completo sem `maxItems` retornou 200; adicionar `systemInstruction`, `candidateCount: 1` e `maxOutputTokens: 3000` manteve HTTP 200. O `pnpm gemini:check` real passou tanto para “Quero vender bolo e quero margem de 10%” quanto para o lote de brigadeiros. Assim, o `GEMINI_BAD_REQUEST` desapareceu sem desativar Structured Output nem relaxar a validação do backend.
 
@@ -113,7 +113,7 @@ Tanto quota quanto excesso de requisições podem vir como 429. O adapter difere
 
 `js/main.js` chama `/auth/me` no carregamento inicial, com `credentials: "include"` pelo api-client. Sem sessão, a resposta `401 SESSION_REQUIRED` leva ao login e não gera novas tentativas. O Console pode manter essa requisição depois de um login bem-sucedido. Abrir o modal e analisar uma mensagem não chama `/auth/me` novamente. Falhas transitórias de inicialização permitem até duas novas tentativas.
 
-Apenas `SESSION_REQUIRED` significa sessão expirada, inclusive no bootstrap. Respostas e tentativas antigas são descartadas se o estado de autenticação tiver mudado. O backend mantém sessões PostgreSQL, salva a sessão antes de concluir login/cadastro e usa cookie `HttpOnly`, `SameSite=Lax`, `Secure` em produção e `trust proxy=1` para HTTPS terminado no Render.
+Apenas `SESSION_REQUIRED` significa sessão expirada, inclusive no bootstrap. Respostas e tentativas antigas são descartadas se o estado de autenticação tiver mudado. O backend mantém sessões PostgreSQL, salva a sessão antes de concluir login/cadastro e usa cookie `HttpOnly`, `SameSite=Lax`, `Secure` em produção e `trust proxy=1` para reconhecer HTTPS encaminhado pela Vercel.
 
 Não foi possível comprovar a ordem do 401 da captura sem o histórico das requisições e os logs da sessão. Se ele aparecer **após** login, confira a sequência na aba Network e se o navegador envia o cookie `pricing.sid`, sem copiar seu valor. Um 401 de `/auth/me` significa ausência de usuário reconhecido naquela requisição; não é uma chamada à Gemini. Falha de banco segue o tratamento de erro do servidor e não deve ser interpretada como senha inválida ou `SESSION_REQUIRED`.
 
@@ -210,7 +210,7 @@ O formulário atual não tem campos de alíquotas individuais de ICMS, IPI, PIS/
 - Estimativas respeitam os limites do formulário e limites mais estreitos: perda até 30%, carga manual até 35%, taxa de pagamento até 15%, comissão até 40%, margem estimada até 60%, prazos até 365 dias e embalagem/frete proporcionais ao custo principal. Por exemplo, embalagem estimada de R$ 500 para material de R$ 15 é recusada como `AI_VALUE_OUT_OF_RANGE`.
 - O modelo não recebe ferramentas, arquivos, variáveis de ambiente ou segredos no prompt. A chave é enviada somente no cabeçalho HTTP do backend. Instruções dentro da mensagem são tratadas como dados de extração.
 - O backend retorna erros próprios, sem propagar corpos de erro, prompts ou cabeçalhos da API externa. Limita a mensagem a 4000 caracteres e o corpo da resposta externa a 100 kB.
-- O rate limit é oito chamadas por minuto por usuário e por IP, além de uma solicitação simultânea por usuário. Os contadores estão em memória por processo: ao escalar para várias instâncias, configure um store compartilhado para manter o orçamento global.
+- O rate limit é oito chamadas por minuto por usuário e por IP, além de uma solicitação simultânea por usuário. Os contadores estão em memória por instância Vercel; configure um store compartilhado ou controle equivalente no Vercel Firewall para manter um orçamento global.
 - A rota responde `Cache-Control: no-store`. A aplicação não salva conversas no banco e não registra a mensagem em logs. A chamada generateContent não envia histórico nem cria armazenamento explícito de conversa. Isso não substitui as políticas de uso e retenção da Gemini para o plano contratado.
 - Cancelar, editar a mensagem, reutilizar/resetar um produto e encerrar a sessão invalidam a prévia e as respostas atrasadas. O formulário manual continua disponível durante indisponibilidade da IA.
 
@@ -222,7 +222,7 @@ Execute `pnpm lint`, `pnpm test` e `pnpm build`. Os testes de provider e da rota
 
 Na correção do HTTP 502 de 11/09/2026 passaram 252 testes, lint de 76 arquivos JavaScript e build. Os contratos cobrem endpoint nativo, cabeçalho da chave, JSON Schema externo compatível, limite posterior no backend, preflight de modelo/método, multipartes, bloqueio de conteúdo e distinção entre quota e limite temporário. Houve chamada autenticada real com `gemini-3.5-flash-lite`: os dois controles incompatíveis retornaram 400, o payload final retornou 200 e `pnpm gemini:check` validou os casos de bolo e brigadeiros de ponta a ponta. A chave permaneceu somente no `.env` ignorado pelo Git.
 
-Na evolução da interpretação do mesmo dia, a suíte passou a cobrir 272 testes e o lint 77 arquivos JavaScript. `pnpm gemini:check` passou novamente, e `pnpm gemini:evaluate` validou os dez casos fixos contra a API real: todos os `generateContent` aceitos retornaram HTTP 200; campos inequívocos corresponderam ao esperado, totais sem quantidade e valores negativos viraram pendências, e preço de venda não virou custo. Essa chamada comprova o contrato e o acesso da conta local utilizada, não a configuração do serviço Render.
+Na evolução da interpretação do mesmo dia, a suíte passou a cobrir 272 testes e o lint 77 arquivos JavaScript. `pnpm gemini:check` passou novamente, e `pnpm gemini:evaluate` validou os dez casos fixos contra a API real: todos os `generateContent` aceitos retornaram HTTP 200; campos inequívocos corresponderam ao esperado, totais sem quantidade e valores negativos viraram pendências, e preço de venda não virou custo. Essa chamada comprova o contrato e o acesso da conta local utilizada, não a configuração da Vercel.
 
 Na correção do follow-up em 12/09/2026, a suíte passou a cobrir 280 testes. Foram adicionados casos de “por unidade”, lote sem quantidade, “pelo lote, rende 100 unidades”, resposta parcial, resposta vazia, merge sem apagar valores, validação posterior e preservação da prévia em erro. A avaliação real do caso `clarification-unit` com `gemini-3.5-flash-lite` retornou HTTP 200 tanto para a análise inicial quanto para o segundo `generateContent`; o resultado combinado foi produto `bolo`, matéria-prima `15`, margem `10`, `pending: []` e `needsClarification: false`. Em uma matriz real executada em sequência houve timeouts e um 503 transitórios; os quatro casos afetados passaram com HTTP 200 ao serem repetidos isoladamente.
 
@@ -242,7 +242,7 @@ Na correção da regressão mensal de 12/09/2026, passaram 328 testes, lint de 7
 - “Faço brigadeiro. Ingredientes por unidade custam R$ 20, embalagem por unidade R$ 5 e quero margem de 30%.”: prévia de produto, matéria-prima `20`, embalagem `5` e margem `30`.
 - “Quero mudar minha margem para 20%.”: apenas margem `20`; demais campos preservados.
 
-Após configurar a chave no Render, entre na aplicação e abra **Preencher com IA**. Teste:
+Após configurar a chave na Vercel, entre na aplicação e abra **Preencher com IA**. Teste:
 
 Com `AI_FILL_MODE=complete`, reproduza: “Faço brigadeiros, gasto R$ 40 por lote de 100 unidades e quero margem de 30%.” Antes de confirmar, o formulário deve continuar intacto. A prévia deve conter produto, matéria-prima `0,40`, margem `30%`, hipóteses auxiliares em **Estimado pela IA** e a quantidade mensal como pendência. O lote `100` não pode preencher `expectedMonthlyUnits`. Depois de informar uma quantidade explicitamente mensal, **Aplicar ao simulador** usa a fórmula existente. Um frete manual válido já presente prevalece sobre frete estimado.
 

@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [html, main, dashboard, styles, server, envExample, renderConfig] = await Promise.all([
-  "../index.html", "../js/main.js", "../js/ui/dashboard.js", "../styles.css", "../server.js", "../.env.example", "../render.yaml",
+const [html, main, dashboard, styles, server, envExample, vercelConfig] = await Promise.all([
+  "../index.html", "../js/main.js", "../js/ui/dashboard.js", "../styles.css", "../server.js", "../.env.example", "../vercel.json",
 ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
 
 test("interface identifica a estimativa IBPT e exige escolha explícita da origem", () => {
@@ -79,7 +79,7 @@ test("backend usa o provider local e publica taxEstimate no health", () => {
 });
 
 test("o fluxo publicado não requer configuração FiscalHub", () => {
-  const activeSources = [main, dashboard, server, envExample, renderConfig].join("\n");
+  const activeSources = [main, dashboard, server, envExample, vercelConfig].join("\n");
   assert.doesNotMatch(activeSources, /FiscalHub|FISCALHUB_API_KEY|FISCALHUB_EMPRESA_ID|api\.fiscalhub\.com\.br/);
   assert.match(main, /response\.taxEstimate/);
   assert.match(main, /productOrigin/);

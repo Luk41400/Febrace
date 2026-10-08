@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,6 +34,14 @@ function transformModule(source) {
 }
 
 const modules = await Promise.all(sourceFiles.map(async (file) => transformModule(await readFile(resolve(projectRoot, file), "utf8"))));
-const bundle = `/* Gerado por scripts/build.mjs. Edite os arquivos em js/ e execute npm run build. */\n\n${modules.join("\n\n")}`;
+const bundle = `/* Gerado por scripts/build.mjs. Edite os arquivos em js/ e execute pnpm build. */\n\n${modules.join("\n\n")}`;
 
 await writeFile(resolve(projectRoot, "app.js"), bundle, "utf8");
+
+// Vercel serves these browser assets from public/ through its CDN. The
+// original files remain at the root for the local Express routes and tests.
+const publicRoot = resolve(projectRoot, "public");
+await mkdir(publicRoot, { recursive: true });
+for (const name of ["styles.css", "ai-assistant.css", "favicon.svg", "theme-init.js", "file-protocol-redirect.js", "app.js"]) {
+  await copyFile(resolve(projectRoot, name), resolve(publicRoot, name));
+}
