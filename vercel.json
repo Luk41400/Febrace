@@ -3,7 +3,8 @@
   "buildCommand": "pnpm build",
   "functions": {
     "server.js": {
-      "includeFiles": "**/*.{html,csv}"
+      "includeFiles": "**/*.{html,csv}",
+      "supportsCancellation": true
     }
   }
 }

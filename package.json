@@ -16,7 +16,7 @@
     "gemini:check": "node scripts/check-gemini.mjs",
     "gemini:evaluate": "node scripts/evaluate-gemini-assistant.mjs",
     "gemini:probe": "node scripts/probe-gemini-payload.mjs",
-    "searchapi:check": "node scripts/check-searchapi.mjs",
+    "dataforseo:check": "node scripts/check-dataforseo.mjs",
     "test": "node --test --test-isolation=none"
   },
   "dependencies": {

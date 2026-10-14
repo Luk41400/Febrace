@@ -1,10 +1,10 @@
 import "dotenv/config";
-import { getSearchApiConfig } from "../lib/config.js";
-import { createSearchApiMarketProvider } from "../lib/searchapi-market-provider.js";
+import { getDataForSeoConfig } from "../lib/config.js";
+import { createDataForSeoMarketProvider } from "../lib/dataforseo-market-provider.js";
 
-const config = getSearchApiConfig();
+const config = getDataForSeoConfig();
 if (!config.isConfigured) {
-  throw new Error("SEARCHAPI_API_KEY não foi definida. Configure-a somente no ambiente do backend.");
+  throw new Error(`Configuração de mercado ausente: ${config.missingEnvironmentVariables.join(", ")}. Configure somente no backend.`);
 }
 
 const argumentsWithoutSeparator = process.argv.slice(2).filter((argument) => argument !== "--");
@@ -17,7 +17,7 @@ const queries = compareVariants ? [
   "iphone 18 pro max",
   "iPhone 18 Pro Max 256GB",
 ] : [requestedQuery || "Iphone 18 Pro Max"];
-const provider = createSearchApiMarketProvider(config);
+const provider = createDataForSeoMarketProvider(config);
 
 for (const query of queries) {
   const result = await provider.search(query, { refresh: compareVariants });

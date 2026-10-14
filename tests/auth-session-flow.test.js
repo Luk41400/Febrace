@@ -187,7 +187,7 @@ function apiFixture(status, code) {
 }
 
 test("api-client envia cookies na rota IA e preserva sessão em erros de integração", async () => {
-  for (const [status, code] of [[401, "AI_PROVIDER_AUTH_ERROR"], [401, "SEARCHAPI_UNAUTHORIZED"], [401, ""], [503, "AI_UNAVAILABLE"]]) {
+  for (const [status, code] of [[401, "AI_PROVIDER_AUTH_ERROR"], [401, "MARKET_UNAUTHORIZED"], [401, ""], [503, "AI_UNAVAILABLE"]]) {
     const fixture = apiFixture(status, code);
     await assert.rejects(fixture.client.post("/ai/parse-pricing", { message: "Mude margem para 20%." }), (error) => error.status === status && error.code === code);
     assert.equal(fixture.calls[0].options.credentials, "include");

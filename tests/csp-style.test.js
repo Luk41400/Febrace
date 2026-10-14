@@ -52,11 +52,11 @@ test("a CSP mantém estilos restritos à própria aplicação", async () => {
   assert.ok(!source.toLowerCase().includes(formerMarketplaceApiHost));
 });
 
-test("o bundle do navegador não contém a chave nem o endpoint autenticado da SearchAPI", async () => {
+test("o bundle do navegador não contém credenciais nem o endpoint autenticado da DataForSEO", async () => {
   const bundle = await readFile(resolve(projectRoot, "app.js"), "utf8");
 
-  assert.doesNotMatch(bundle, /SEARCHAPI_API_KEY|searchapi\.io\/api\/v1\/search/);
-  assert.doesNotMatch(bundle, /Authorization:\s*[\`"']Bearer/i);
+  assert.doesNotMatch(bundle, /DATAFORSEO_LOGIN|DATAFORSEO_PASSWORD|api\.dataforseo\.com\/v3\/merchant/);
+  assert.doesNotMatch(bundle, /Authorization:\s*[\`"'](?:Bearer|Basic)/i);
   assert.match(bundle, /\/market\/search\?q=/);
 });
 

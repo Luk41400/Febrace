@@ -9,13 +9,13 @@ const baseConfig = {
 };
 
 test("rota de mercado informa a configuração ausente sem expor valores", async () => {
-  const config = { ...baseConfig, missingEnvironmentVariables: ["SEARCHAPI_API_KEY"] };
+  const config = { ...baseConfig, missingEnvironmentVariables: ["DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"] };
   await assert.rejects(
     () => runMarketSearch({ provider: null, config, logger: { info() {}, warn() {} }, query: "Iphone" }),
     (error) => {
-      assert.equal(error.code, "SEARCHAPI_NOT_CONFIGURED");
+      assert.equal(error.code, "MARKET_NOT_CONFIGURED");
       assert.equal(error.status, 503);
-      assert.deepEqual(error.details.missingEnvironmentVariables, ["SEARCHAPI_API_KEY"]);
+      assert.deepEqual(error.details.missingEnvironmentVariables, ["DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"]);
       return true;
     },
   );
@@ -49,7 +49,7 @@ test("rota executa as duas consultas pedidas e registra somente metadados seguro
   }
   assert.equal(logs[0][0], "[Market] queryLength=6");
   assert.equal(logs[4][0], "[Market] queryLength=17");
-  assert.match(logs[1][0], /Provider: SearchAPI Google Shopping/);
+  assert.match(logs[1][0], /Provider: DataForSEO Google Shopping/);
   assert.doesNotMatch(JSON.stringify(logs), /Iphone|iPhone 15 Pro Max/);
   assert.doesNotMatch(JSON.stringify(logs), /authorization|bearer|nk-/i);
 });
@@ -64,4 +64,17 @@ test("atualização manual encaminha o bypass de cache ao provider", async () =>
     refresh: true,
   });
   assert.deepEqual(options, { refresh: true });
+});
+
+test("encaminha sinal de cancelamento ao provider sem alterar a rota pública", async () => {
+  const controller = new AbortController();
+  let receivedSignal;
+  const provider = {
+    async search(_query, options) {
+      receivedSignal = options.signal;
+      return { results: [] };
+    },
+  };
+  await runMarketSearch({ provider, config: baseConfig, logger: { info() {} }, query: "produto", signal: controller.signal });
+  assert.equal(receivedSignal, controller.signal);
 });

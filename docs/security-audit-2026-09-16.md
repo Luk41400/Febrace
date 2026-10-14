@@ -49,11 +49,11 @@ Cadastro novo retornava `201` e duplicidade retornava `409` com mensagem explíc
 
 Correção: cadastro novo e duplicado retornam a mesma resposta `202`, sem autenticar; o usuário entra depois. O login usa um hash sentinela quando o e-mail não existe, mantendo o custo de bcrypt antes da resposta genérica.
 
-### LOW — respostas de provedores sem limite em Focus/SearchAPI — corrigido
+### LOW — respostas de provedores sem limite em Focus/mercado — corrigido
 
-Gemini já limitava 100 KB, mas Focus NFe e SearchAPI podiam materializar um corpo sem limite antes de validar JSON.
+Gemini já limitava 100 KB, mas Focus NFe e o provedor de mercado podiam materializar um corpo sem limite antes de validar JSON.
 
-Correção: os três provedores agora têm limite de 100 KB e timeout. Corpos com `Content-Length` excessivo são recusados antes da leitura; streaming é interrompido ao ultrapassar o teto.
+Correção: os provedores agora têm limites de corpo e timeout específicos. Corpos com `Content-Length` excessivo são recusados antes da leitura; streaming é interrompido ao ultrapassar o teto. A integração atual de mercado aceita até 1 MB por causa do tamanho das respostas SERP.
 
 ### LOW — conteúdo de negócio e detalhes de erro nos logs — corrigido
 
@@ -95,7 +95,7 @@ Ação: na Vercel, as Functions podem escalar automaticamente. Mover rate limits
 - Headers defensivos são verificados em resposta HTTP.
 - Troca de senha revoga sessões atomicamente.
 - HTML e URLs maliciosas de referência não sobrevivem à renderização/reuso.
-- Focus NFe e SearchAPI recusam corpos excessivos.
+- Focus NFe e o provedor de mercado recusam corpos excessivos.
 - Arquivos privados não aparecem na lista pública do servidor.
 
 ## Limitações e ações pós-deploy

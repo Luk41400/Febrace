@@ -874,7 +874,7 @@ class MarketService {
     return {
       query: normalizedQuery,
       marketplace: response?.marketplace || "Marketplace",
-      provider: response?.provider || "SearchAPI / Google Shopping",
+      provider: response?.provider || "Google Shopping",
       items,
       stats: calculateMarketStats(items),
       consultedAt: Number.isFinite(Date.parse(consultedAt)) ? consultedAt : "",
@@ -3757,15 +3757,15 @@ function setMarketError(query, caughtError) {
   let error = "Não foi possível consultar o mercado agora.";
   if (caughtError instanceof ApiError && caughtError.code === "MARKET_RATE_LIMITED") {
     error = "Muitas atualizações foram solicitadas. Aguarde um minuto e tente novamente.";
-  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_RATE_LIMITED") {
+  } else if (caughtError instanceof ApiError && caughtError.code === "MARKET_UPSTREAM_RATE_LIMITED") {
     error = "O provedor limitou temporariamente as consultas. Aguarde um pouco e tente novamente.";
-  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_NOT_CONFIGURED") {
+  } else if (caughtError instanceof ApiError && caughtError.code === "MARKET_NOT_CONFIGURED") {
     error = "Consulta de mercado temporariamente indisponível.";
-  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_UNAUTHORIZED") {
+  } else if (caughtError instanceof ApiError && caughtError.code === "MARKET_UNAUTHORIZED") {
     error = "Não foi possível autenticar a consulta de mercado.";
-  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_FORBIDDEN") {
+  } else if (caughtError instanceof ApiError && caughtError.code === "MARKET_FORBIDDEN") {
     error = "A conta do provedor não possui acesso à pesquisa no Google Shopping.";
-  } else if (caughtError instanceof ApiError && caughtError.code === "SEARCHAPI_TIMEOUT") {
+  } else if (caughtError instanceof ApiError && caughtError.code === "MARKET_TIMEOUT") {
     error = "A consulta demorou mais que o esperado. Tente novamente.";
   }
 
@@ -4159,7 +4159,7 @@ function reuseProduct(product) {
     stats: reference?.stats || null,
     selectedItem: reference?.selectedProduct || null,
     marketplace: reference?.marketplace || "Google Shopping",
-    provider: reference?.provider || "SearchAPI / Google Shopping",
+    provider: reference?.provider || "Google Shopping",
     error: "",
   };
   elements.marketReferenceRule.value = marketRuleForForm(reference?.rule);

@@ -74,7 +74,7 @@ export class MarketService {
     return {
       query: normalizedQuery,
       marketplace: response?.marketplace || "Marketplace",
-      provider: response?.provider || "SearchAPI / Google Shopping",
+      provider: response?.provider || "Google Shopping",
       items,
       stats: calculateMarketStats(items),
       consultedAt: Number.isFinite(Date.parse(consultedAt)) ? consultedAt : "",

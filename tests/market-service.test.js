@@ -25,7 +25,7 @@ test("consulta somente a rota interna e mostra até cinco itens relevantes", asy
       calls.push(path);
       return {
         marketplace: "Google Shopping",
-        provider: "SearchAPI / Google Shopping",
+        provider: "DataForSEO / Google Shopping",
         results: [
           { id: "B001", title: "Produto teste", price: 99.9, currency: "BRL", source: "Loja A", seller: "Loja A", category: "Eletrônicos", url: "https://google.example/a", rating: 4.7, reviews: 20 },
           { id: "B002", title: "Sem preço", price: null, currency: "BRL", source: "Loja B", url: "https://google.example/b" },
@@ -41,7 +41,7 @@ test("consulta somente a rota interna e mostra até cinco itens relevantes", asy
   assert.deepEqual(calls, ["/market/search?q=produto%20teste"]);
   assert.equal(result.items.length, 5);
   assert.equal(result.items[0].category, "Eletrônicos");
-  assert.equal(result.provider, "SearchAPI / Google Shopping");
+  assert.equal(result.provider, "DataForSEO / Google Shopping");
   assert.equal(result.items[0].seller, "Loja A");
   assert.equal(result.items[0].rating, 4.7);
 });

@@ -15,7 +15,7 @@ Antes de propor uma implementação, tenha em mente:
 3. O arquivo [app.js](app.js) é **gerado**. O código editável está em [js/](js/) e precisa passar por [scripts/build.mjs](scripts/build.mjs).
 4. O cálculo oficial está em [js/domain/pricing-calculator.js](js/domain/pricing-calculator.js). Navegador e backend usam esse mesmo módulo; gráficos e cards apenas exibem seus resultados.
 5. A IA **interpreta entradas e, no modo `complete`, sugere inputs auxiliares identificados como estimativas**. Dados essenciais do negócio, como custo principal, margem e quantidade mensal sem contexto explícito, permanecem pendentes. A IA nunca deve determinar o preço final nem substituir as fórmulas.
-6. A consulta de mercado atual é **SearchAPI.io / Google Shopping**. Menções antigas a Amazon ou a outro marketplace não descrevem o provedor ativo.
+6. A consulta de mercado atual é **DataForSEO / Google Shopping**. Menções antigas a Amazon ou a outro marketplace não descrevem o provedor ativo.
 7. A **Focus NFe pesquisa e confirma NCM**. A **IBPT estima a carga do card de maior preço de mercado**. Essas responsabilidades são diferentes da carga tributária manual utilizada no preço sustentável.
 8. Produtos salvos pertencem ao usuário autenticado. Reutilizar um produto, editar seus metadados e recalcular uma nova simulação são operações diferentes.
 9. Segredos, banco local, sessão do navegador e simulações não salvas não são transferidos por um clone do Git. A seção de continuidade entre dispositivos explica essa diferença.
@@ -59,7 +59,7 @@ Há quatro responsabilidades centrais:
 | Comparar | Consulta produtos no mercado ou usa uma referência manual, sem ajustar automaticamente o preço recomendado para coincidir com concorrentes. |
 | Registrar | Salva uma precificação privada, vinculada ao usuário, com entradas e resultado histórico. |
 
-O preenchimento por IA facilita a entrada desses dados. A pesquisa de mercado oferece uma comparação externa. A consulta fiscal fornece classificação e uma estimativa separada. O funcionamento do simulador manual não depende de obter uma resposta da Gemini, da SearchAPI ou da Focus NFe.
+O preenchimento por IA facilita a entrada desses dados. A pesquisa de mercado oferece uma comparação externa. A consulta fiscal fornece classificação e uma estimativa separada. O funcionamento do simulador manual não depende de obter uma resposta da Gemini, da DataForSEO ou da Focus NFe.
 
 O projeto não implementa controle de estoque, pedidos, recebimentos, emissão de nota fiscal ou uma plataforma completa de gestão empresarial. A finalidade atual é **precificação, comparação e histórico de simulações**.
 
@@ -89,7 +89,7 @@ A página **Sobre** resume a proposta do assistente sem reproduzir todo o formul
 
 ### Mercado e classificação fiscal
 
-O usuário pode pesquisar um produto usando nome, marca e modelo. Os resultados da SearchAPI/Google Shopping aparecem no dashboard, com preço e informações disponíveis do anúncio. O usuário escolhe se quer usar uma referência individual; essa escolha preserva a referência manual anterior para permitir sua restauração.
+O usuário pode pesquisar um produto usando nome, marca e modelo. Os resultados da DataForSEO/Google Shopping aparecem no dashboard, com preço e informações disponíveis do anúncio. O usuário escolhe se quer usar uma referência individual; essa escolha preserva a referência manual anterior para permitir sua restauração.
 
 Após uma pesquisa de mercado bem-sucedida, o fluxo prepara uma descrição fiscal normalizada e procura sugestões de NCM. O usuário pode ajustar a categoria e precisa confirmar uma sugestão relevante. A origem nacional/importada é uma escolha explícita. Para importados, a interface também exige o país no fluxo da estimativa.
 
@@ -128,7 +128,7 @@ Navegador: index.html + styles.css + ai-assistant.css + app.js
             |
             +-- Sessões, autenticação e produtos --> PostgreSQL
             +-- Salvamento --> o mesmo motor financeiro --> snapshot JSONB
-            +-- /market/search --> SearchAPI / Google Shopping
+            +-- /market/search --> DataForSEO / Google Shopping
             +-- /fiscal/ncms/... --> Focus NFe
             +-- /tax/estimate --> CSV IBPT local
             +-- /ai/parse-pricing --> provedor IA --> validação --> patch
@@ -180,7 +180,7 @@ O cálculo da simulação acontece no navegador para atualizar a interface imedi
 | [lib/profile-account.js](lib/profile-account.js) | Consultas privadas do perfil, atualização da própria conta e troca segura de senha. |
 | [lib/pricing-persistence.js](lib/pricing-persistence.js) | Recalcula a partir das entradas e produz o snapshot financeiro para salvar. |
 | [lib/market-search.js](lib/market-search.js) | Orquestra a pesquisa de mercado e seu contrato de resposta. |
-| [lib/searchapi-market-provider.js](lib/searchapi-market-provider.js) | Cliente externo de Google Shopping, normalização, cache e tratamento de falhas. |
+| [lib/dataforseo-market-provider.js](lib/dataforseo-market-provider.js) | Cliente externo de Google Shopping, normalização, cache e tratamento de falhas. |
 | [lib/focus-nfe-client.js](lib/focus-nfe-client.js) | Cliente autenticado de NCM da Focus NFe e tratamento seguro de respostas. |
 | [lib/fiscal-classification.js](lib/fiscal-classification.js) | Busca de candidatos, confirmação e vínculo da classificação à sessão. |
 | [lib/ibpt-tax-provider.js](lib/ibpt-tax-provider.js) | Carregamento e consulta exata da tabela IBPT local. |
@@ -192,7 +192,7 @@ O cálculo da simulação acontece no navegador para atualizar a interface imedi
 | [scripts/](scripts/) | Build, lint, migrations e verificações explícitas das integrações. |
 | [tests/](tests/) | Testes de domínio, contrato, UI, providers, persistência e fluxos. |
 | [data/ibpt/](data/ibpt/) | Arquivo de referência tributária utilizado pelo provider local. |
-| [docs/](docs/) | Guias específicos de IA, SearchAPI, Focus NFe e IBPT. |
+| [docs/](docs/) | Guias específicos de IA, DataForSEO, Focus NFe e IBPT. |
 | [vercel.json](vercel.json) | Build e inclusão explícita do HTML e CSV IBPT na Function Express da Vercel. |
 | [docker-compose.yml](docker-compose.yml) | Banco PostgreSQL para desenvolvimento local; a aplicação Node é iniciada separadamente. |
 | [.env.example](.env.example) | Nomes de variáveis e exemplos sem credenciais reais. |
@@ -229,7 +229,7 @@ Isso tem consequências importantes para manutenção:
 - Histórico com busca por nome, ordenação por data, visualização, edição, exclusão e reutilização de uma precificação anterior.
 - Salvamento de todos os campos relevantes da consulta (entradas, memória do cálculo e referência de mercado) em `calculation_data`.
 - Normalização editável do produto em categoria fiscal, com sugestões reais da Focus NFe filtradas por relevância e confirmação explícita de NCM.
-- Consulta opcional de produtos e preços do Google Shopping pela SearchAPI.io, sempre através do backend.
+- Consulta opcional de produtos e preços do Google Shopping pela DataForSEO, sempre através do backend.
 - Estimativa local dos tributos do produto de maior preço pela tabela IBPT após confirmação do NCM e escolha explícita entre origem nacional e importada.
 - Cálculo técnico canônico no mesmo módulo puro para navegador e servidor, com validação em ambos os lados e sem arredondamentos intermediários.
 - Validação no navegador e no servidor, limitação de tentativas de autenticação, cabeçalhos de segurança e respostas sem hashes/senhas.
@@ -406,20 +406,22 @@ Defina `FOCUS_NFE_TOKEN` somente no ambiente do processo. Em desenvolvimento, a 
 
 O assistente usa a Focus NFe apenas para consultar e validar a descrição de um NCM exato. Ela não é apresentada como origem do cálculo tributário. Consulte [docs/focus-nfe.md](docs/focus-nfe.md) para os limites dessa validação.
 
-### SearchAPI.io / Google Shopping
+### DataForSEO / Google Shopping
 
-A busca de mercado usa o endpoint oficial de Google Shopping da SearchAPI.io. O navegador chama apenas `GET /market/search`; autenticação Bearer, cache de pesquisa por cinco minutos, deduplicação de chamadas e normalização ficam no backend. A interface mostra até cinco resultados relevantes quando a resposta contém dados compatíveis.
+A pesquisa usa o endpoint Merchant Google Shopping Products da DataForSEO. O navegador continua chamando somente `GET /market/search`; o backend cria uma task de alta prioridade, aguarda sua conclusão por polling e devolve os produtos no contrato atual. O backend usa HTTP Basic, normaliza preços BRL, mantém cache de cinco minutos e deduplica chamadas simultâneas. Os cards, a seleção de referência e o ranking permanecem iguais.
 
-Configure somente no ambiente do servidor:
+Configure somente no backend:
 
 ```text
-SEARCHAPI_API_KEY
-SEARCHAPI_TIMEOUT_MS=15000
+DATAFORSEO_LOGIN
+DATAFORSEO_PASSWORD
+DATAFORSEO_TIMEOUT_MS=15000
+DATAFORSEO_TASK_TIMEOUT_MS=120000
 ```
 
-`SEARCHAPI_API_KEY` é a única credencial de mercado obrigatória e deve ser criada no painel da SearchAPI.io. Nunca a coloque no frontend. Sem ela, `/health` retorna apenas `market.configured: false` e a pesquisa fica indisponível; o simulador continua funcionando com o campo manual **Preço médio local dos concorrentes (R$)**.
+Use o login e a senha da área **API Access** da DataForSEO. Sem ambos, `/health` informa `market.configured: false` e a consulta externa fica indisponível; o simulador mantém o campo manual **Preço médio local dos concorrentes (R$)**. A DataForSEO cobra por uso, sem franquia mensal fixa, mas há custos por task e limites técnicos. A busca adicional só acontece quando a primeira resposta tem menos de cinco produtos principais relevantes e a consulta simplificada muda o termo; ela pode gerar uma segunda cobrança. Tasks de prioridade alta têm custo maior e podem levar cerca de um minuto ou mais. O prazo total da rota é limitado.
 
-O endpoint diferencia configuração ausente (`503`), consulta inválida (`400`), credencial recusada ou sem permissão (`401/403`), limite (`429`), resposta externa inválida (`502`), falhas externas (`5xx`) e timeout (`504`). Os logs registram apenas consulta, provedor, status, contagem e uso de cache — nunca a chave ou o cabeçalho de autorização. Consulte [docs/searchapi.md](docs/searchapi.md) para o contrato externo e o teste real.
+O backend distingue configuração ausente (`503`), consulta inválida (`400`), autenticação/permissão (`401/403`), limite externo (`429`), resposta inválida (`502`), indisponibilidade (`5xx`) e timeout (`504`). O limite local do Express continua separado do limite da API. Logs nunca incluem login, senha, cabeçalho de autorização nem resposta externa bruta. Consulte [docs/dataforseo.md](docs/dataforseo.md) para o contrato, limitações do endpoint e teste manual.
 
 ### Estimativa IBPT
 
@@ -456,8 +458,10 @@ A referência editável é [.env.example](.env.example), e a interpretação efe
 | `FOCUS_NFE_TOKEN` | Credencial de consulta NCM | Somente backend; precisa corresponder ao ambiente escolhido. |
 | `FOCUS_NFE_BASE_URL` | Ambiente oficial da Focus | Opcional; a configuração aceita apenas as origens oficiais previstas no código. |
 | `FOCUS_NFE_TIMEOUT_MS` | Timeout da Focus | Padrão `5000`; inteiro entre 100 e 30000. |
-| `SEARCHAPI_API_KEY` | Credencial de Google Shopping | Somente backend; sem ela, a alternativa manual de mercado continua disponível. |
-| `SEARCHAPI_TIMEOUT_MS` | Timeout da SearchAPI | Padrão `15000`; inteiro entre 100 e 30000. |
+| `DATAFORSEO_LOGIN` | Login da área API Access | Somente backend; sem ele, a alternativa manual de mercado continua disponível. |
+| `DATAFORSEO_PASSWORD` | Senha da área API Access | Somente backend; não é exposta no navegador ou no health. |
+| `DATAFORSEO_TIMEOUT_MS` | Timeout de cada requisição HTTP à DataForSEO | Padrão `15000`; inteiro entre 100 e 30000. |
+| `DATAFORSEO_TASK_TIMEOUT_MS` | Prazo total do polling Merchant | Padrão `120000`; inteiro entre 30000 e 240000. |
 | `GEMINI_API_KEY` | Credencial do preenchimento IA | Somente backend; sem ela, o formulário manual continua disponível. |
 | `AI_PROVIDER` | Implementação do provedor IA | Padrão e implementação atual: `gemini`. |
 | `AI_MODEL` | Modelo de extração estruturada | Padrão configurado: `gemini-3.5-flash-lite`. |
@@ -477,11 +481,11 @@ Referências oficiais: [Express na Vercel](https://vercel.com/docs/frameworks/ba
 1. Envie este projeto ao GitHub sem `.env` ou segredos. Ao importar o repositório em **Vercel → Add New → Project**, escolha como **Root Directory** a pasta que contém `package.json`, `server.js` e `vercel.json`. Se o repositório tiver esta pasta na raiz, deixe a raiz padrão.
 2. Confirme o preset **Express** e Node.js **24.x**. `package.json` fixa `engines.node=24.x`; não configure build ou output directory antigos no painel. O `buildCommand` do repositório é `pnpm build`, e o lockfile seleciona pnpm.
 3. Configure um PostgreSQL compatível por integração do [Vercel Marketplace](https://vercel.com/marketplace?category=databases) ou por provedor externo. Cadastre a conexão em `DATABASE_URL` no ambiente correto. Mantenha o banco acessível à região da Function e respeite o limite de conexões do provedor; cada instância Vercel pode manter seu próprio pool.
-4. Em **Project Settings → Environment Variables**, cadastre `DATABASE_URL` e uma `SESSION_SECRET` aleatória com pelo menos 32 caracteres. Defina `NODE_ENV=production` e `SESSION_COOKIE_SECURE=true` em Production. Cadastre `FOCUS_NFE_TOKEN`, `SEARCHAPI_API_KEY` e `GEMINI_API_KEY` somente se essas integrações forem usadas. Ajuste, se necessário, `FOCUS_NFE_BASE_URL=https://api.focusnfe.com.br`, `FOCUS_NFE_TIMEOUT_MS=5000`, `SEARCHAPI_TIMEOUT_MS=15000`, `AI_PROVIDER=gemini`, `AI_MODEL=gemini-3.5-flash-lite`, `AI_FILL_MODE=complete` e `AI_TIMEOUT_MS=25000`. Não cadastre `PORT` na Vercel. Ative **Enable access to System Environment Variables** para disponibilizar `VERCEL_GIT_COMMIT_SHA` e os metadados usados pelo ciclo de vida do pool.
+4. Em **Project Settings → Environment Variables**, cadastre `DATABASE_URL` e uma `SESSION_SECRET` aleatória com pelo menos 32 caracteres. Defina `NODE_ENV=production` e `SESSION_COOKIE_SECURE=true` em Production. Cadastre `FOCUS_NFE_TOKEN`, `DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD` e `GEMINI_API_KEY` somente se essas integrações forem usadas. Ajuste, se necessário, `FOCUS_NFE_BASE_URL=https://api.focusnfe.com.br`, `FOCUS_NFE_TIMEOUT_MS=5000`, `DATAFORSEO_TIMEOUT_MS=15000`, `DATAFORSEO_TASK_TIMEOUT_MS=120000`, `AI_PROVIDER=gemini`, `AI_MODEL=gemini-3.5-flash-lite`, `AI_FILL_MODE=complete` e `AI_TIMEOUT_MS=25000`. Não cadastre `PORT` na Vercel. Ative **Enable access to System Environment Variables** para disponibilizar `VERCEL_GIT_COMMIT_SHA` e os metadados usados pelo ciclo de vida do pool.
 5. Crie uma Preview Deployment de uma branch com `DATABASE_URL` e `SESSION_SECRET` **isoladas da produção**, além de `NODE_ENV=production` e `SESSION_COOKIE_SECURE=true` para testar o mesmo comportamento de cookie HTTPS. Execute `pnpm migrate` somente contra esse banco de Preview, se ele for novo. Teste `/`, `/index.html`, CSS, JavaScript, `/health`, `/auth/me` sem sessão, cadastro/login/logout, `/products` e as integrações habilitadas. `/health` deve mostrar `database: "connected"` e `taxEstimate.configured: true`.
 6. Prepare o banco de produção e execute `pnpm migrate` em um terminal ou pipeline controlado apontando para a `DATABASE_URL` de produção; confira `schema_migrations` e as tabelas antes de liberar a versão. **Não** inclua `pnpm migrate` no Build Command, em Preview automática ou em `postinstall`.
 7. Para o primeiro release, publique a branch de produção somente após a migração e os testes de Preview. Para releases futuros com migrations, use uma implantação Production preparada sem atribuição automática do domínio, verifique o banco e então promova o deployment; configure no painel o bloqueio de atribuição automática de domínios ou Deployment Checks antes de usar esse fluxo. Uma promoção direta de Preview para Production gera novo build com variáveis de Production, então valide a versão de Production antes de apontar o domínio.
-8. Na URL **Production** atribuída pela Vercel, confirme `/health`, carregamento dos assets, `Set-Cookie` com `HttpOnly`, `Secure` e `SameSite=Lax`, persistência de login em `/auth/me`, logout, revogação de sessões após troca de senha, leitura e gravação no PostgreSQL, IBPT, Focus NFe, SearchAPI e Gemini conforme configuradas. Não publique a URL temporária de Preview como endereço permanente.
+8. Na URL **Production** atribuída pela Vercel, confirme `/health`, carregamento dos assets, `Set-Cookie` com `HttpOnly`, `Secure` e `SameSite=Lax`, persistência de login em `/auth/me`, logout, revogação de sessões após troca de senha, leitura e gravação no PostgreSQL, IBPT, Focus NFe, DataForSEO e Gemini conforme configuradas. Não publique a URL temporária de Preview como endereço permanente.
 
 O banco de produção antigo do Render **não é migrado pelo deploy do código**. Preserve-o enquanto transfere os dados. Para trocar de provedor, interrompa escritas, faça backup consistente com `pg_dump`, restaure em um PostgreSQL novo compatível com `pg_restore`/`psql`, execute `pnpm migrate` no destino e confira schema, `schema_migrations`, usuários, produtos, histórico e `user_sessions`. A mudança de domínio exige novo login mesmo se a tabela de sessões for copiada, pois o cookie antigo pertence ao domínio anterior. Só altere `DATABASE_URL` em Production e libere tráfego após validar o banco novo; mantenha o backup e o banco antigo até concluir a conferência. Nenhuma credencial ou dado real deve entrar no repositório.
 
@@ -496,11 +500,11 @@ O frontend e a API são servidos pelo mesmo processo; não há um segundo servid
 - `SESSION_SECRET não foi definida`: copie `.env.example` para `.env` e informe uma chave aleatória de pelo menos 32 caracteres.
 - `DATABASE_URL não foi definida` ou falha de conexão: inicie o PostgreSQL e confira host, porta, usuário, senha e nome do banco no `.env`.
 - `MIGRATIONS_PENDING`: execute `npm run migrate` (ou `pnpm migrate`) antes de iniciar a aplicação.
-- `market.configured: false` no `/health`: confira se `SEARCHAPI_API_KEY` foi configurada no backend. O endpoint nunca mostra a chave.
+- `market.configured: false` no `/health`: confira `DATAFORSEO_LOGIN` e `DATAFORSEO_PASSWORD` no backend. O endpoint nunca mostra credenciais.
 - `ai.configured: false` no `/health`: consulte `ai.configurationErrors`. `GEMINI_API_KEY_MISSING` significa que a chave não foi cadastrada no backend desse ambiente. Confira também `AI_PROVIDER`, `AI_MODEL`, `AI_FILL_MODE` e `AI_TIMEOUT_MS`; não altere segredos de sessão para corrigir a IA.
 - IA configurada, mas análise falha: compare `ai.model`, `ai.timeoutMs` e `deployment.commit`; depois cruze o JSON seguro da rota com `[AI] upstreamStatus`, `[AI] upstreamErrorCode` e `[AI] upstreamErrorStatus`. Nenhuma mensagem, chave, cabeçalho ou corpo de resposta é registrado. Execute uma vez `pnpm gemini:check` em um terminal controlado com a configuração desse ambiente para verificar conta, método e geração estruturada. Consulte a tabela em [docs/ai-assistant.md](docs/ai-assistant.md#códigos-de-erro).
 - `/auth/me` 401 no carregamento sem sessão é a checagem inicial que abre o login. Se ocorrer após autenticar, confira a ordem das requisições e o envio do cookie sem expor seu valor. Somente `SESSION_REQUIRED` encerra a sessão no frontend; 401 externo não deve deslogar. O bootstrap descarta respostas/tentativas antigas após mudança de autenticação.
-- `market.configured: true` confirma somente que a variável existe. Depois de uma pesquisa, consulte os logs `[Market] Status` e `[Market] Results` para distinguir credencial inválida (`401`), falta de permissão (`403`), limite (`429`) e falha externa (`5xx`).
+- `market.configured: true` confirma somente que as duas credenciais existem. Depois de uma pesquisa, consulte os logs `[Market] Status` e `[Market] Results` para distinguir credencial inválida (`401`), falta de permissão (`403`), limite (`429`) e falha externa (`5xx`).
 - `taxEstimate.configured: false` no `/health`: confira se `data/ibpt/TabelaIBPTaxSP26.2.A.csv` foi incluído sem conversão. `errorCode` distingue arquivo ausente de arquivo inválido.
 
 Em `pnpm start` local, o servidor testa a conexão com o PostgreSQL e confirma que as tabelas exigidas existem. Na Vercel, o app é importado sem listener; `/health` testa a conexão e uma migration ausente precisa ser corrigida antes da promoção.
@@ -534,7 +538,7 @@ pnpm lint        # verifica a sintaxe dos arquivos JavaScript
 pnpm build       # gera app.js a partir dos módulos em js/
 pnpm test        # executa os testes
 pnpm focus:check # consulta não destrutiva de NCM somente em homologação
-pnpm searchapi:check -- "iPhone 15 Pro Max" # executa uma busca real de validação
+pnpm dataforseo:check -- "iPhone 15 Pro Max" # executa uma busca real, potencialmente paga, de validação
 ```
 
 `app.js` é gerado. Edite os módulos de `js/` e rode `pnpm build` antes de publicar alterações do frontend.
@@ -590,7 +594,7 @@ Um banco local recém-criado começa vazio. Dados de produção não fazem parte
 | GET | `/products/:id` | Obrigatória + dono |
 | GET | `/fiscal/ncms/:codigo` | Obrigatória; proxy backend para Focus NFe |
 | GET | `/fiscal/ncms/search?q=descricao` | Obrigatória; sugestões fiscais por descrição da Focus NFe, sem confirmação automática |
-| GET | `/market/search?q=termos` | Obrigatória; proxy backend para SearchAPI Google Shopping |
+| GET | `/market/search?q=termos` | Obrigatória; proxy backend para DataForSEO Google Shopping |
 | POST | `/ai/parse-pricing` | Obrigatória; extrai e valida campos para prévia, sem calcular preço |
 | POST | `/tax/estimate` | Obrigatória; estima localmente a carga IBPT sobre o maior preço informado pelo state |
 | POST | `/products` | Obrigatória |
@@ -679,7 +683,7 @@ Esse texto ajuda a solicitar a leitura do contexto explicitamente, sem depender 
 | Regra financeira solicitada | `js/domain/pricing-calculator.js`, `tests/pricing-calculator.test.js` | Reavalie versões, snapshot e compatibilidade histórica; não duplique a fórmula em UI ou backend. |
 | Problema ao salvar | `js/main.js`, `lib/validation.js`, `lib/pricing-persistence.js`, `server.js` | Diferencie formulário inválido, sessão, erro de banco e montagem do snapshot. |
 | Meus produtos | `js/ui/history.js`, `js/main.js`, rotas `/products`, `lib/models.js` | Preserve isolamento por usuário e histórico sem recálculo silencioso. |
-| Busca de mercado | `js/services/market-service.js`, `lib/market-search.js`, `lib/searchapi-market-provider.js` | Preserve moeda, referência manual, seleção individual e distinção entre falha externa e sessão expirada. |
+| Busca de mercado | `js/services/market-service.js`, `lib/market-search.js`, `lib/dataforseo-market-provider.js` | Preserve moeda, referência manual, seleção individual e distinção entre falha externa e sessão expirada. |
 | NCM e classificação | Módulos de classificação, `lib/focus-nfe-client.js`, rotas fiscais | Preserve confirmação explícita, relevância e vínculo à consulta atual. |
 | Card IBPT | `lib/ibpt-tax-provider.js`, `js/services/tax-service.js`, `js/ui/dashboard.js` | Confira origem, código exato, arquivo, vigência e invalidação do resultado anterior. |
 | IA | `lib/ai-*`, `lib/gemini-form-provider.js`, `js/ui/ai-assistant.js`, `js/ui/form.js` | Valide extração, origem, estimativas e prévia; mantenha credenciais no backend e cálculo fora do modelo. |
@@ -719,7 +723,7 @@ Requisições mutáveis autenticadas por cookie passam por uma verificação de 
 
 O Helmet configura CSP com scripts e estilos da própria aplicação. `style-src-attr 'none'` significa que soluções baseadas em estilos inline podem falhar em produção. Prefira classes e atributos de apresentação já tratados em CSS; os testes verificam esse contrato.
 
-As credenciais externas ficam no ambiente do servidor. As rotas usam validação e limites de chamadas. Respostas da Gemini, SearchAPI e Focus NFe possuem limite de corpo e timeout; URLs de referências de mercado são restritas a HTTPS antes da persistência e do reuso. Logs de mercado e classificação registram comprimentos, status e contagens, não a consulta completa. No caso de IA, há também limite de mensagem/resposta, JSON estruturado, validação de evidências e tratamento seguro de erros anteriores à rota, como JSON malformado.
+As credenciais externas ficam no ambiente do servidor. As rotas usam validação e limites de chamadas. Respostas da Gemini, DataForSEO e Focus NFe possuem limite de corpo e timeout; URLs de referências de mercado são restritas a HTTPS antes da persistência e do reuso. Logs de mercado e classificação registram comprimentos, status e contagens, não a consulta completa. No caso de IA, há também limite de mensagem/resposta, JSON estruturado, validação de evidências e tratamento seguro de erros anteriores à rota, como JSON malformado.
 
 Não conclua que uma integração está funcional apenas porque `configured` está verdadeiro. Essa informação indica presença/configuração; uma chamada pode falhar por permissão, credencial, ambiente, quota ou disponibilidade. Os guias de cada integração descrevem os diagnósticos específicos.
 
@@ -764,7 +768,7 @@ Na evolução de **Meu perfil** em 14/09/2026, passaram **351 testes**, lint de 
 
 Na simplificação da página **Sobre** em 16/09/2026, passaram **376 testes**, lint de 84 arquivos JavaScript e build sobre a `main` atualizada. A apresentação foi condensada em hero, quatro etapas, quatro resultados principais e um aviso final; acordeões e cards promocionais redundantes foram removidos sem retirar as funcionalidades correspondentes do simulador. A prévia local confirmou grids de 4, 2 e 1 coluna em desktop, tablet e celular, respectivamente, nas larguras 1366, 768 e 390 px, sem estouro horizontal.
 
-Na auditoria de segurança de 16/09/2026, passaram **389 testes**, lint de 87 arquivos JavaScript e build. Foram corrigidos escape e URLs de referências persistidas, revogação transacional de sessões na troca de senha, proteção de mesma origem para escritas, enumeração de cadastro/login, limites de resposta da Focus NFe/SearchAPI e minimização de logs. Os testes de autorização cobrem listagem, leitura, alteração e exclusão entre duas contas, além de sessão ausente/inválida, SQLi, mass assignment, CSRF e headers. O relatório completo está em [docs/security-audit-2026-09-16.md](docs/security-audit-2026-09-16.md). `pnpm audit --prod` foi executado, mas o registro npm não pôde ser consultado porque o trust store desta máquina retornou `UNABLE_TO_VERIFY_LEAF_SIGNATURE`; a verificação TLS não foi desativada.
+Na auditoria de segurança de 16/09/2026, passaram **389 testes**, lint de 87 arquivos JavaScript e build. Foram corrigidos escape e URLs de referências persistidas, revogação transacional de sessões na troca de senha, proteção de mesma origem para escritas, enumeração de cadastro/login, limites de resposta da Focus NFe e do provedor de mercado então usado, além de minimização de logs. Os testes de autorização cobrem listagem, leitura, alteração e exclusão entre duas contas, além de sessão ausente/inválida, SQLi, mass assignment, CSRF e headers. O relatório completo está em [docs/security-audit-2026-09-16.md](docs/security-audit-2026-09-16.md). `pnpm audit --prod` foi executado, mas o registro npm não pôde ser consultado porque o trust store desta máquina retornou `UNABLE_TO_VERIFY_LEAF_SIGNATURE`; a verificação TLS não foi desativada.
 
 Na correção do salvamento sem referência de mercado em 17/09/2026, passaram **395 testes**, lint de 88 arquivos JavaScript e build. O frontend passou a omitir `pricing.market.rule` quando não existe referência ativa e a converter o estado histórico interno `none` para o fallback visual manual, sem enviar string vazia. O backend continua aceitando somente ausência ou `manual`, `selected-product`, `market-average` e `market-median`; valores vazios ou arbitrários continuam retornando 400. Um POST HTTP local com margem de 10% confirmou status 201, preço de mercado nulo e a identificação “Sem referência de mercado”.
 
@@ -787,7 +791,7 @@ Para alterações de código, execute os scripts pertinentes e depois confira o 
 ### Guias complementares
 
 - [Assistente IA: contrato, campos, limites e configuração](docs/ai-assistant.md)
-- [SearchAPI / Google Shopping: provedor de mercado](docs/searchapi.md)
+- [DataForSEO / Google Shopping: provedor de mercado](docs/dataforseo.md)
 - [Focus NFe: pesquisa e confirmação de NCM](docs/focus-nfe.md)
 - [IBPT: fonte, arquivo, estimativa e limitações](docs/ibpt.md)
 

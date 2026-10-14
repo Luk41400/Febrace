@@ -80,12 +80,12 @@ test("mantém regras presentes no payload para que o backend aplique a enumeraç
     rule: "manual",
     query: "bolo",
     marketplace: "Google Shopping",
-    provider: "SearchAPI",
+    provider: "DataForSEO",
   }), {
     rule: "manual",
     query: "bolo",
     marketplace: "Google Shopping",
-    provider: "SearchAPI",
+    provider: "DataForSEO",
     selectedProduct: null,
     stats: null,
   });

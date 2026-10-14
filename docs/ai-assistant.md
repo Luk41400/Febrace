@@ -198,7 +198,7 @@ O formulário atual não tem campos de alíquotas individuais de ICMS, IPI, PIS/
 
 “Adicione R$ 4 de frete” define frete como `4`; não soma a valores desconhecidos do formulário. “Retire o desconto” zera as duas modalidades. No modo completo, o provedor tenta preencher cada obrigatório não crítico; se ainda faltar algum, o backend cria `AI_REQUIRED_FIELD_MISSING`. Produto, custo principal, margem ou base de lote realmente ambíguos continuam exigindo decisão da pessoa.
 
-“Pesquise iPhone 15 Pro Max no mercado” prepara `marketQuery` e oferece **Pesquisar no mercado** após a aplicação. A pesquisa real permanece na integração atual SearchAPI / Google Shopping; seus providers e o fluxo fiscal não foram substituídos.
+“Pesquise iPhone 15 Pro Max no mercado” prepara `marketQuery` e oferece **Pesquisar no mercado** após a aplicação. A pesquisa real permanece na integração de mercado com DataForSEO / Google Shopping; o fluxo fiscal é independente.
 
 ## Validação e proteção
 
