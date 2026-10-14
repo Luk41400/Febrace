@@ -720,6 +720,7 @@ function updateCurrentUser(user) {
 }
 
 function clearAuthenticatedState() {
+  const hadAuthenticatedUser = Boolean(state.user);
   aiAssistant.invalidate();
   authenticationRevision += 1;
   clearTimeout(productSearchTimer);
@@ -742,7 +743,7 @@ function clearAuthenticatedState() {
   $("#currentUserName").textContent = "Conta";
   profileSettings.closeForSession();
   clearMarketReference(window.sessionStorage);
-  window.history.replaceState(null, "", window.location.pathname);
+  if (hadAuthenticatedUser) window.history.replaceState(null, "", window.location.pathname);
 }
 
 function endSession(message = "Sua sessão expirou. Entre novamente.") {

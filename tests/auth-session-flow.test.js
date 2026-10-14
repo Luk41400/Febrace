@@ -29,6 +29,7 @@ function bootstrapFixture(get) {
   const timers = [];
   const authViews = [];
   const sessionEvents = [];
+  const replacements = [];
   const nodes = new Map();
   const context = vm.createContext({
     state: { user: null, products: [], selectedProduct: null, taxAvailability: null },
@@ -51,14 +52,14 @@ function bootstrapFixture(get) {
     },
     window: {
       setTimeout: (callback, delay) => { timers.push({ callback, delay }); },
-      history: { replaceState() {} },
-      location: { pathname: "/" },
+      history: { replaceState(_state, _title, url) { replacements.push(url); } },
+      location: { pathname: "/", search: "", hash: "" },
       sessionStorage: {},
     },
   });
   vm.runInContext(between(mainSource, "function setAuthenticatedUser(", "function setMarketError("), context);
   vm.runInContext(between(mainSource, "async function bootstrap(", "\nupdatePasswordRequirements();"), context);
-  return { context, requests, timers, authViews, nodes, sessionEvents };
+  return { context, requests, timers, authViews, nodes, sessionEvents, replacements };
 }
 
 test("bootstrap faz uma checagem inicial com cookies e recupera o usuário da sessão", async () => {
@@ -76,12 +77,26 @@ test("bootstrap faz uma checagem inicial com cookies e recupera o usuário da se
 
 test("401 inicial com SESSION_REQUIRED abre login uma vez e não agenda novas checagens", async () => {
   const fixture = bootstrapFixture(async () => { throw new ApiError("Sessão necessária", 401, "SESSION_REQUIRED"); });
+  fixture.context.window.location.search = "?teste=1";
+  fixture.context.window.location.hash = "#assistente";
   await fixture.context.bootstrap();
   assert.equal(fixture.context.state.user, null);
+  assert.equal(fixture.replacements.length, 0);
+  assert.equal(fixture.context.window.location.search, "?teste=1");
+  assert.equal(fixture.context.window.location.hash, "#assistente");
   assert.equal(fixture.authViews.length, 1);
   assert.match(fixture.authViews[0].message, /sessão expirou/);
   assert.equal(fixture.requests.length, 1);
   assert.equal(fixture.timers.length, 0);
+});
+
+test("logout autenticado continua limpando a rota", () => {
+  const fixture = bootstrapFixture(async () => ({}));
+  fixture.context.state.user = { id: "user-a", name: "Usuário de teste" };
+  fixture.context.window.location.search = "?teste=1";
+  fixture.context.window.location.hash = "#assistente";
+  fixture.context.endSession();
+  assert.deepEqual(fixture.replacements, ["/"]);
 });
 
 test("bootstrap não interpreta um HTTP 401 sem SESSION_REQUIRED como sessão expirada", async () => {

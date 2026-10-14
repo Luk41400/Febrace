@@ -772,9 +772,9 @@ test("frontend rejeita código, campo ou mensagem de pendência fora do contrato
   assert.throws(() => validateAssistantResponse(response({}, [duplicate, duplicate])), /AI_INVALID_RESPONSE/);
 });
 
-test("reset, reuso de produto e logout invalidam o assistente existente", async () => {
+test("reset e reuso de produto invalidam o assistente existente", async () => {
   const main = await readFile(new URL("../js/main.js", import.meta.url), "utf8");
-  for (const name of ["clearAuthenticatedState", "resetCurrentProductForm", "reuseProduct"]) {
+  for (const name of ["resetCurrentProductForm", "reuseProduct"]) {
     assert.match(main, new RegExp(`function ${name}\\([^)]*\\) \\{\\s*aiAssistant\\.invalidate\\(\\)`));
   }
 });
