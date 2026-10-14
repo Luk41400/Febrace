@@ -8,19 +8,8 @@ export class ApiError extends Error {
   }
 }
 
-function isGitHubPages() {
-  return window.location.hostname.endsWith(".github.io");
-}
-
 async function request(path, options = {}) {
   const { method = "GET", body, handleUnauthorized = true, signal } = options;
-  if (isGitHubPages() && (path.startsWith("/auth") || path.startsWith("/products") || path.startsWith("/market") || path.startsWith("/tax") || path.startsWith("/fiscal") || path.startsWith("/ai"))) {
-    throw new ApiError(
-      "Este endereço do GitHub Pages exibe apenas a interface. Abra a URL de produção da aplicação na Vercel para criar ou acessar sua conta.",
-      503,
-      "STATIC_HOSTING",
-    );
-  }
   let response;
   try {
     response = await fetch(path, {

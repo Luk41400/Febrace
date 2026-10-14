@@ -1564,10 +1564,6 @@ async function bootstrap(attempt = 0, revision = authenticationRevision) {
     setAuthenticatedUser(response.user, response.taxEstimate);
   } catch (error) {
     if (revision !== authenticationRevision) return;
-    if (error instanceof ApiError && error.code === "STATIC_HOSTING") {
-      showAuth("login", error.message);
-      return;
-    }
     const isInactiveSession = error instanceof ApiError && error.code === "SESSION_REQUIRED";
     if (!isInactiveSession && attempt < 2) {
       window.setTimeout(() => void bootstrap(attempt + 1, revision), 800);

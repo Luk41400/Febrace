@@ -491,7 +491,7 @@ O banco de produção antigo do Render **não é migrado pelo deploy do código*
 
 Os rate limits atuais usam memória por instância. A Vercel pode executar várias instâncias, portanto os limites não são globais. Antes de confiar neles como orçamento global de tentativas ou de chamadas pagas, configure um store compartilhado compatível com `express-rate-limit` ou regras equivalentes no Vercel Firewall; as verificações de autenticação, origem e sessão continuam ativas por requisição. O pool `pg` é criado uma vez por instância e `attachDatabasePool` libera conexões ociosas antes da suspensão da Function.
 
-O GitHub Pages em `https://luk41400.github.io/Febrace/` serve apenas como endereço legado: `file-protocol-redirect.js` redireciona imediatamente para `https://febrace.vercel.app/` com `location.replace()`, preservando caminho após `/Febrace`, query string e fragmento. `404.html` cobre caminhos antigos sem arquivo correspondente. O Pages não executa `server.js`, sessões ou PostgreSQL; a aplicação funciona no domínio da Vercel. A abertura local por `file://` continua redirecionando para `http://localhost:3000/`.
+O GitHub Pages em `https://luk41400.github.io/Febrace/` serve apenas como endereço legado: o script inline no início do `<head>` de `index.html` chama `location.replace()` para `https://febrace.vercel.app/`, preservando caminho após `/Febrace`, query string e fragmento. `404.html` contém o mesmo script inline para caminhos antigos sem arquivo correspondente. O Pages não executa `server.js`, sessões ou PostgreSQL; a aplicação funciona no domínio da Vercel. `file-protocol-redirect.js` mantém a abertura local por `file://` apontando para `http://localhost:3000/`.
 
 ## Diagnóstico de inicialização
 

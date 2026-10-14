@@ -2,6 +2,18 @@
 <html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      (() => {
+        const { hostname, pathname, search, hash } = window.location;
+        if (
+          hostname === "luk41400.github.io" &&
+          (pathname === "/Febrace" || pathname.startsWith("/Febrace/"))
+        ) {
+          const destinationPath = pathname.slice("/Febrace".length) || "/";
+          window.location.replace(`https://febrace.vercel.app${destinationPath}${search}${hash}`);
+        }
+      })();
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Assistente de Precificação</title>
     <link rel="icon" href="favicon.svg?v=ap" type="image/svg+xml" />

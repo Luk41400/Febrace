@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,9 +7,19 @@ import { runInNewContext } from "node:vm";
 import test from "node:test";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const source = await readFile(resolve(projectRoot, "file-protocol-redirect.js"), "utf8");
+const index = await readFile(resolve(projectRoot, "index.html"), "utf8");
+const fallback = await readFile(resolve(projectRoot, "404.html"), "utf8");
+const localScript = await readFile(resolve(projectRoot, "file-protocol-redirect.js"), "utf8");
 
-function destinationFor(address) {
+function inlineRedirect(html) {
+  const head = html.match(/<head>([\s\S]*?)<\/head>/)?.[1];
+  assert.ok(head, "HTML precisa ter um <head>");
+  const script = head.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script, "redirecionamento precisa estar inline no <head>");
+  return script.replace(/\r\n?/g, "\n");
+}
+
+function destinationFor(source, address) {
   const { protocol, hostname, pathname, search, hash } = new URL(address);
   let destination = null;
   runInNewContext(source, {
@@ -22,27 +33,35 @@ function destinationFor(address) {
   return destination;
 }
 
-test("GitHub Pages redireciona para Vercel preservando query e fragmento", () => {
-  assert.equal(destinationFor("https://luk41400.github.io/Febrace/"), "https://febrace.vercel.app/");
-  assert.equal(destinationFor("https://luk41400.github.io/Febrace/#alguma-coisa"), "https://febrace.vercel.app/#alguma-coisa");
-  assert.equal(destinationFor("https://luk41400.github.io/Febrace/?x=1"), "https://febrace.vercel.app/?x=1");
-  assert.equal(destinationFor("https://luk41400.github.io/Febrace/?x=1#alguma-coisa"), "https://febrace.vercel.app/?x=1#alguma-coisa");
-  assert.equal(destinationFor("https://luk41400.github.io/Febrace/antigo/?x=1#topo"), "https://febrace.vercel.app/antigo/?x=1#topo");
+test("index e 404 redirecionam diretamente para Vercel com caminho, query e hash", () => {
+  const indexScript = inlineRedirect(index);
+  assert.equal(inlineRedirect(fallback), indexScript);
+  for (const source of [indexScript, inlineRedirect(fallback)]) {
+    assert.equal(destinationFor(source, "https://luk41400.github.io/Febrace/"), "https://febrace.vercel.app/");
+    assert.equal(destinationFor(source, "https://luk41400.github.io/Febrace/?teste=1"), "https://febrace.vercel.app/?teste=1");
+    assert.equal(destinationFor(source, "https://luk41400.github.io/Febrace/#assistente"), "https://febrace.vercel.app/#assistente");
+    assert.equal(destinationFor(source, "https://luk41400.github.io/Febrace/rota/?teste=1#assistente"), "https://febrace.vercel.app/rota/?teste=1#assistente");
+    assert.equal(destinationFor(source, "https://febrace.vercel.app/"), null);
+    assert.equal(destinationFor(source, "http://localhost:3000/"), null);
+    assert.equal(destinationFor(source, "https://outro.github.io/Febrace/"), null);
+  }
 });
 
-test("redirecionamento local permanece restrito a file://", () => {
-  assert.equal(destinationFor("file:///C:/projeto/index.html"), "http://localhost:3000/");
-  assert.equal(destinationFor("http://localhost:3000/"), null);
-  assert.equal(destinationFor("https://febrace.vercel.app/"), null);
-  assert.equal(destinationFor("https://outro.github.io/Febrace/"), null);
-  assert.equal(destinationFor("https://luk41400.github.io/FebraceOutra/"), null);
+test("redirecionamento inline é o primeiro código no head e tem hash CSP exato", async () => {
+  const scriptStart = index.indexOf("<script>");
+  assert.ok(scriptStart > index.indexOf("<head>"));
+  assert.ok(scriptStart < index.indexOf('src="file-protocol-redirect.js"'));
+  assert.ok(scriptStart < index.indexOf('src="theme-init.js"'));
+  assert.ok(scriptStart < index.indexOf('href="styles.css"'));
+  assert.ok(scriptStart < index.indexOf('href="ai-assistant.css"'));
+  assert.ok(scriptStart < index.indexOf("<body>"));
+
+  const digest = createHash("sha256").update(inlineRedirect(index)).digest("base64");
+  const security = await readFile(resolve(projectRoot, "lib", "request-security.js"), "utf8");
+  assert.ok(security.includes(`'sha256-${digest}'`));
 });
 
-test("redirect carrega antes da interface e também na página 404 do Pages", async () => {
-  const index = await readFile(resolve(projectRoot, "index.html"), "utf8");
-  const fallback = await readFile(resolve(projectRoot, "404.html"), "utf8");
-  const redirectPosition = index.indexOf('<script src="file-protocol-redirect.js"></script>');
-  assert.ok(redirectPosition > 0 && redirectPosition < index.indexOf("<body>"));
-  assert.ok(redirectPosition < index.indexOf('<script src="theme-init.js"></script>'));
-  assert.match(fallback, /<script src="\/Febrace\/file-protocol-redirect\.js"><\/script>/);
+test("file:// continua apontando para localhost sem alterar outros hosts", () => {
+  assert.equal(destinationFor(localScript, "file:///C:/projeto/index.html"), "http://localhost:3000/");
+  assert.equal(destinationFor(localScript, "http://localhost:3000/"), null);
 });
