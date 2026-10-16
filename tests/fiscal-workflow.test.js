@@ -64,6 +64,7 @@ function workflow({ originRuleProvider = null, beforeTax = async () => {} } = {}
     setTimeout: (callback) => setImmediate(callback), clearTimeout: clearImmediate,
     $, document, elements, state: { taxAvailability: taxProvider.health(), countryOfOrigin: "" },
     ncmSearchRevision: 0, ncmLookupRevision: 0, marketSearchRevision: 0, manualMarketValue: null,
+    marketRuntime: { provider: "", marketplace: "" },
     normalizeProductForFiscalSearch, isRelevantFiscalNcm, normalizeNcmDescription, normalizeFiscalState, marketTaxError, marketTaxPrerequisiteError, ApiError,
     taxService: new TaxService({ apiClient: api }), api,
     clearMarketReference() {}, window: { sessionStorage: {} },

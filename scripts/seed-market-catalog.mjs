@@ -1,15 +1,17 @@
 import "dotenv/config";
 import pg from "pg";
 import { demoMarketProducts } from "../data/market-catalog-demo.js";
+import { getMarketConfig } from "../lib/config.js";
 
 if (process.env.NODE_ENV === "production") {
   throw new Error("O seed fictício não pode ser executado em produção.");
 }
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL não foi definida. Configure um PostgreSQL de desenvolvimento/teste.");
+const marketConfig = getMarketConfig();
+if (marketConfig.type !== "postgres" || !marketConfig.isConfigured) {
+  throw new Error("Configure MARKET_PROVIDER=postgres e uma conexão de catálogo de desenvolvimento/teste.");
 }
 
-const databaseHost = new URL(process.env.DATABASE_URL).hostname;
+const databaseHost = new URL(marketConfig.databaseUrl).hostname;
 const isLocalDatabase = ["localhost", "127.0.0.1", "[::1]", "database"].includes(databaseHost);
 const isExplicitNeonTest = databaseHost.endsWith(".neon.tech")
   && process.env.MARKET_PROVIDER === "postgres"
@@ -18,7 +20,7 @@ if (!isLocalDatabase && !isExplicitNeonTest) {
   throw new Error("O seed fictício aceita apenas PostgreSQL local; Neon de teste exige MARKET_SEED_ALLOW_NEON_TEST=1 e MARKET_PROVIDER=postgres.");
 }
 
-const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+const client = new pg.Client({ connectionString: marketConfig.databaseUrl });
 await client.connect();
 try {
   const { rows } = await client.query("SELECT to_regclass('public.market_catalog') AS catalog");

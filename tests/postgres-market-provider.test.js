@@ -6,6 +6,7 @@ import vm from "node:vm";
 
 import { demoMarketProducts } from "../data/market-catalog-demo.js";
 import { getMarketConfig, marketHealth } from "../lib/config.js";
+import { createMarketDatabasePool } from "../lib/market-database.js";
 import { createMarketProvider } from "../lib/market-provider.js";
 import { runMarketSearch } from "../lib/market-search.js";
 import { MARKET_CATALOG_SEARCH_SQL, createPostgresMarketProvider } from "../lib/postgres-market-provider.js";
@@ -32,9 +33,9 @@ function fakePool(rows = [row]) {
 }
 
 test("seleciona PostgreSQL sem credenciais e nunca instancia DataForSEO", () => {
-  const config = getMarketConfig({ MARKET_PROVIDER: "postgres" });
+  const config = getMarketConfig({ MARKET_PROVIDER: "postgres", MARKET_DATABASE_URL: "postgresql://market.example/catalog" });
   assert.deepEqual(marketHealth(config), {
-    provider: "PostgreSQL Catalog", marketplace: "Catálogo local", configured: true,
+    provider: "PostgreSQL Catalog", marketplace: "Catálogo de mercado", configured: true,
   });
   const pool = fakePool();
   let dataForSeoCalls = 0;
@@ -47,6 +48,58 @@ test("seleciona PostgreSQL sem credenciais e nunca instancia DataForSEO", () => 
   assert.equal(getMarketConfig({}).type, "dataforseo");
   assert.equal(createMarketProvider(getMarketConfig({}), { pool }), null);
   assert.throws(() => getMarketConfig({ MARKET_PROVIDER: "outro" }), /MARKET_PROVIDER/);
+});
+
+test("catálogo usa URL independente e sessões permanecem no pool principal", async () => {
+  const mainUrl = "postgresql://main.example/application";
+  const marketUrl = "postgresql://market.example/catalog";
+  const config = getMarketConfig({
+    MARKET_PROVIDER: "postgres", NODE_ENV: "production",
+    DATABASE_URL: mainUrl, MARKET_DATABASE_URL: marketUrl,
+  });
+  assert.equal(config.databaseUrl, marketUrl);
+  assert.equal(config.databaseSource, "MARKET_DATABASE_URL");
+  assert.equal(config.isConfigured, true);
+
+  let options;
+  let attached;
+  class FakePool extends EventEmitter {
+    constructor(received) { super(); options = received; }
+  }
+  const marketPool = createMarketDatabasePool(config, {
+    PoolClass: FakePool, attach(pool) { attached = pool; },
+  });
+  assert.equal(options.connectionString, marketUrl);
+  assert.equal(attached, marketPool);
+
+  const [databaseSource, serverSource] = await Promise.all([
+    readFile(new URL("../lib/database.js", import.meta.url), "utf8"),
+    readFile(new URL("../server.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(databaseSource, /connectionString: config\.databaseUrl/);
+  assert.doesNotMatch(databaseSource, /MARKET_DATABASE_URL/);
+  assert.match(serverSource, /store: new PgSession\(\{ pool,/);
+  assert.match(serverSource, /createMarketDatabasePool\(marketConfig\)/);
+  assert.match(serverSource, /createMarketProvider\(marketConfig, \{ pool: marketPool \}\)/);
+});
+
+test("produção exige banco de mercado distinto; fallback ao principal é só de desenvolvimento", () => {
+  const primary = "postgresql://main.example/application";
+  const missing = getMarketConfig({ MARKET_PROVIDER: "postgres", NODE_ENV: "production", DATABASE_URL: primary });
+  assert.equal(missing.isConfigured, false);
+  assert.deepEqual(missing.missingEnvironmentVariables, ["MARKET_DATABASE_URL"]);
+  assert.equal(createMarketDatabasePool(missing), null);
+  assert.equal(createMarketProvider(missing), null);
+
+  const shared = getMarketConfig({ MARKET_PROVIDER: "postgres", NODE_ENV: "production", DATABASE_URL: primary, MARKET_DATABASE_URL: primary });
+  assert.equal(shared.isConfigured, false);
+  assert.deepEqual(shared.missingEnvironmentVariables, ["MARKET_DATABASE_URL_DISTINCT_FROM_DATABASE_URL"]);
+
+  const development = getMarketConfig({ MARKET_PROVIDER: "postgres", NODE_ENV: "development", DATABASE_URL: primary });
+  assert.equal(development.isConfigured, true);
+  assert.equal(development.databaseUrl, primary);
+  assert.equal(development.databaseSource, "DATABASE_URL");
+  assert.equal(createMarketDatabasePool(getMarketConfig({ MARKET_PROVIDER: "dataforseo" })), null);
 });
 
 test("busca usa FTS parametrizado, acentos e palavras em qualquer ordem", async () => {
@@ -62,7 +115,7 @@ test("busca usa FTS parametrizado, acentos e palavras em qualquer ordem", async 
     consultedAt: "2026-10-16T00:00:00.000Z", rating: 4.5, reviews: 12,
   });
   assert.equal(result.provider, "PostgreSQL Catalog");
-  assert.equal(result.marketplace, "Catálogo local");
+  assert.equal(result.marketplace, "Catálogo de mercado");
   await provider.search("CADERNO UNIVERSITÁRIO");
   assert.equal(pool.calls[1].values[0], "caderno:* & universitario:*");
   await provider.search("cader");
@@ -169,7 +222,7 @@ test("rota real preserva autenticação e responde pelo provider PostgreSQL", as
   const noop = (_req, _res, next) => next();
   const pool = fakePool([row]);
   let dataForSeoCalls = 0;
-  const marketConfig = getMarketConfig({ MARKET_PROVIDER: "postgres" });
+  const marketConfig = getMarketConfig({ MARKET_PROVIDER: "postgres", MARKET_DATABASE_URL: "postgresql://market.example/catalog" });
   const marketProvider = createMarketProvider(marketConfig, {
     pool,
     createDataForSeo() { dataForSeoCalls += 1; throw new Error("chamada proibida"); },

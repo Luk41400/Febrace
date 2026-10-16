@@ -45,3 +45,16 @@ test("consulta somente a rota interna e mostra até cinco itens relevantes", asy
   assert.equal(result.items[0].seller, "Loja A");
   assert.equal(result.items[0].rating, 4.7);
 });
+
+test("catálogo vazio mantém resposta válida sem lançar erro", async () => {
+  const service = new MarketService({
+    async get(path) {
+      assert.equal(path, "/market/search?q=iPhone%2015%20Pro%20Max");
+      return { provider: "PostgreSQL Catalog", marketplace: "Catálogo de mercado", results: [] };
+    },
+  });
+  const result = await service.search("IPhone 15 Pro Max");
+  assert.deepEqual(result.items, []);
+  assert.equal(result.stats, null);
+  assert.equal(result.provider, "PostgreSQL Catalog");
+});

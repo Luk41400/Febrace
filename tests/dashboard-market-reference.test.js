@@ -41,6 +41,40 @@ test("consulta mostra horário real e permite atualizar sem perder resultados ap
   assert.match(document.nodes.get("#marketResults").innerHTML, /iPhone 18 Pro Max/);
 });
 
+test("catálogo PostgreSQL mostra cards sem menção a Google Shopping", () => {
+  const document = documentStub();
+  const item = { id: "mouse-1", title: "Mouse sem Fio", price: 39.5, currency: "BRL", source: "Loja Exemplo", seller: "Loja Exemplo", url: "https://example.com/mouse" };
+  renderIncompleteDashboard(document, {
+    status: "success", query: "mouse", items: [item], selectedItem: item,
+    stats: { count: 1, average: 39.5, median: 39.5, min: 39.5, max: 39.5 },
+    provider: "PostgreSQL Catalog", marketplace: "Catálogo de mercado", tax: { status: "idle" },
+  }, {});
+  assert.equal(document.nodes.get("#marketProviderLabel").textContent, "Dados do catálogo de mercado");
+  assert.equal(document.nodes.get('#marketReferenceRule option[value="market-average"]').textContent, "Média da pesquisa de mercado");
+  assert.match(document.nodes.get("#marketResults").innerHTML, /Mouse sem Fio/);
+  assert.match(document.nodes.get("#marketResults").innerHTML, /R\$\s39,50/);
+  assert.match(document.nodes.get("#marketResults").innerHTML, /Loja Exemplo/);
+  assert.match(document.nodes.get("#marketResults").innerHTML, /Ver na loja/);
+  assert.doesNotMatch(document.nodes.get("#marketResults").innerHTML, /Google Shopping/);
+  assert.doesNotMatch(document.nodes.get("#selectedMarketProduct").innerHTML, /Google Shopping/);
+});
+
+test("busca vazia é informativa; erro real mantém indisponibilidade", () => {
+  const document = documentStub();
+  const base = { query: "IPhone 15 Pro Max", items: [], provider: "PostgreSQL Catalog", marketplace: "Catálogo de mercado", tax: { status: "idle" } };
+  renderIncompleteDashboard(document, { ...base, status: "empty" }, {});
+  const emptyMarkup = document.nodes.get("#marketResults").innerHTML;
+  assert.match(emptyMarkup, /Nenhum produto encontrado para “IPhone 15 Pro Max”/);
+  assert.match(emptyMarkup, /data-market-edit-query/);
+  assert.match(emptyMarkup, /data-market-retry/);
+  assert.match(emptyMarkup, /data-market-manual/);
+  assert.doesNotMatch(emptyMarkup, /market-error-alert|Não foi possível consultar/);
+  renderIncompleteDashboard(document, { ...base, status: "error", error: "O catálogo está indisponível." }, {});
+  const errorMarkup = document.nodes.get("#marketResults").innerHTML;
+  assert.match(errorMarkup, /market-error-alert/);
+  assert.match(errorMarkup, /Não foi possível consultar o mercado agora/);
+});
+
 test("dashboard lê o resultado canônico e distingue produto individual", () => {
   const selectedProduct = { id: "produto-1", title: "Produto principal", price: 30, source: "Loja Exemplo", seller: "Loja Exemplo", currency: "BRL", image: "https://example.com/image.jpg", url: "https://example.com/product", rating: 4.7, reviews: 120, consultedAt: "2026-09-02T12:00:00.000Z" };
   const otherProduct = { ...selectedProduct, id: "produto-2", title: "Produto alternativo", price: 32, source: "Outra Loja", seller: "Outra Loja" };

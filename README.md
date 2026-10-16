@@ -128,7 +128,7 @@ Navegador: index.html + styles.css + ai-assistant.css + app.js
             |
             +-- Sessões, autenticação e produtos --> PostgreSQL
             +-- Salvamento --> o mesmo motor financeiro --> snapshot JSONB
-            +-- /market/search --> DataForSEO ou catálogo PostgreSQL (MARKET_PROVIDER)
+            +-- /market/search --> DataForSEO ou MARKET_DATABASE_URL (MARKET_PROVIDER)
             +-- /fiscal/ncms/... --> Focus NFe
             +-- /tax/estimate --> CSV IBPT local
             +-- /ai/parse-pricing --> provedor IA --> validação --> patch
@@ -409,9 +409,9 @@ O assistente usa a Focus NFe apenas para consultar e validar a descrição de um
 
 ### Catálogo PostgreSQL de teste
 
-`MARKET_PROVIDER=postgres` faz `GET /market/search` consultar a tabela `market_catalog` no PostgreSQL existente. Não exige `DATAFORSEO_LOGIN` nem `DATAFORSEO_PASSWORD` e não chama DataForSEO. O padrão continua sendo `MARKET_PROVIDER=dataforseo`, preservando a integração atual. A seleção ocorre apenas no backend; a interface e o contrato de resposta são os mesmos. `/health` informa `provider: "PostgreSQL Catalog"`, `configured: true` e uma contagem de produtos armazenada em cache por um minuto.
+`MARKET_PROVIDER=postgres` faz `GET /market/search` consultar `market_catalog` por um pool separado, usando `MARKET_DATABASE_URL`. Usuários, sessões e produtos salvos continuam usando somente `DATABASE_URL`. Em produção, a URL do catálogo é obrigatória e deve ser diferente da URL principal; sem ela, `/health` informa `market.configured: false`. Em desenvolvimento/teste, `DATABASE_URL` pode servir de fallback explícito quando não houver `MARKET_DATABASE_URL`. O modo PostgreSQL não exige credenciais DataForSEO nem chama sua API. O padrão continua sendo `MARKET_PROVIDER=dataforseo`. A interface usa os mesmos cards e indica a fonte ativa; uma busca válida sem resultados mostra uma mensagem neutra e permite nova pesquisa ou preço manual.
 
-Para experimentar em desenvolvimento/teste, configure `DATABASE_URL` e `SESSION_SECRET`, execute `pnpm migrate`, depois `pnpm market:seed` e inicie com `MARKET_PROVIDER=postgres`. O seed recusa `NODE_ENV=production` e, por padrão, conexões fora de localhost ou do serviço `database` do Docker Compose. Um Neon de teste isolado e com catálogo vazio pode ser usado com `MARKET_SEED_ALLOW_NEON_TEST=1` apenas no comando do seed. Ele insere 28 produtos **inteiramente fictícios** com URLs `example.com`; esses preços não representam lojas ou ofertas reais. Não execute o seed em banco de produção. Consulte [docs/postgres-market.md](docs/postgres-market.md) para consultas de exemplo, limitações e estrutura da tabela.
+Para experimentar em desenvolvimento/teste, configure `DATABASE_URL`, `SESSION_SECRET` e, se tiver um banco separado, `MARKET_DATABASE_URL`. O Neon de teste usado na validação anterior já contém a tabela e os 28 produtos fictícios. O seed recusa `NODE_ENV=production` e, por padrão, conexões fora de localhost ou do serviço `database` do Docker Compose. Um Neon de teste isolado e com catálogo vazio pode ser usado com `MARKET_SEED_ALLOW_NEON_TEST=1` apenas no comando do seed. Esses dados com URLs `example.com` não representam lojas ou ofertas reais. Não execute o seed em banco de produção. Consulte [docs/postgres-market.md](docs/postgres-market.md) para preparação de outro catálogo, consultas de exemplo e limitações.
 
 ### DataForSEO / Google Shopping
 
@@ -465,7 +465,8 @@ A referência editável é [.env.example](.env.example), e a interpretação efe
 | `FOCUS_NFE_TOKEN` | Credencial de consulta NCM | Somente backend; precisa corresponder ao ambiente escolhido. |
 | `FOCUS_NFE_BASE_URL` | Ambiente oficial da Focus | Opcional; a configuração aceita apenas as origens oficiais previstas no código. |
 | `FOCUS_NFE_TIMEOUT_MS` | Timeout da Focus | Padrão `5000`; inteiro entre 100 e 30000. |
-| `MARKET_PROVIDER` | Provider de pesquisa de mercado | `dataforseo` (padrão) ou `postgres` para teste local. |
+| `MARKET_PROVIDER` | Provider de pesquisa de mercado | `dataforseo` (padrão) ou `postgres`. |
+| `MARKET_DATABASE_URL` | Conexão exclusiva do catálogo de mercado | Obrigatória em produção com `MARKET_PROVIDER=postgres`; mantenha distinta de `DATABASE_URL` e cadastre como segredo. |
 | `DATAFORSEO_LOGIN` | Login da área API Access | Somente backend; sem ele, a alternativa manual de mercado continua disponível. |
 | `DATAFORSEO_PASSWORD` | Senha da área API Access | Somente backend; não é exposta no navegador ou no health. |
 | `DATAFORSEO_TIMEOUT_MS` | Timeout de cada requisição HTTP à DataForSEO | Padrão `15000`; inteiro entre 100 e 30000. |

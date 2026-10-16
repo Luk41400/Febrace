@@ -4647,6 +4647,14 @@ tr:last-child td {
   color: var(--muted);
 }
 
+.market-empty-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
 .market-state-wide {
   grid-column: 1 / -1;
 }

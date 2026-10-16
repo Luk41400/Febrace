@@ -10,6 +10,7 @@ import { getConfig, getFocusNfeConfig, getMarketConfig, getAiAssistantConfig, ai
 import { createAiFormProvider } from "./lib/ai-form-assistant.js";
 import { createAiPricingRouter, handleAiRequestError } from "./lib/ai-pricing-route.js";
 import { pool } from "./lib/database.js";
+import { createMarketDatabasePool } from "./lib/market-database.js";
 import { runMarketSearch } from "./lib/market-search.js";
 import { createMarketProvider } from "./lib/market-provider.js";
 import { marketProviderErrorForClient, MarketProviderError, redactMarketProviderSensitiveData } from "./lib/dataforseo-market-provider.js";
@@ -29,7 +30,8 @@ const focusNfeConfig = getFocusNfeConfig();
 const focusNfeClient = focusNfeConfig.isConfigured ? createFocusNFeClient(focusNfeConfig) : null;
 const taxProvider = createIbptTaxProvider({ filePath: resolve(projectRoot, "data", "ibpt", "TabelaIBPTaxSP26.2.A.csv") });
 const marketConfig = getMarketConfig();
-const marketProvider = createMarketProvider(marketConfig, { pool });
+const marketPool = createMarketDatabasePool(marketConfig);
+const marketProvider = createMarketProvider(marketConfig, { pool: marketPool });
 const aiConfig = getAiAssistantConfig();
 const aiProvider = createAiFormProvider(aiConfig);
 const app = express();
@@ -271,7 +273,7 @@ app.get("/health", async (req, res, next) => {
       },
       market: {
         ...marketHealth(marketConfig),
-        ...(marketConfig.type === "postgres" ? { catalogProducts: await marketProvider.countProducts() } : {}),
+        ...(marketConfig.type === "postgres" && marketProvider ? { catalogProducts: await marketProvider.countProducts() } : {}),
       },
       ai: aiAssistantHealth(aiConfig),
       deployment: deploymentHealth(),

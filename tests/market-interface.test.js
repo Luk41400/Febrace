@@ -6,15 +6,17 @@ const [html, dashboard, main, styles] = await Promise.all([
   readFile(new URL("../index.html", import.meta.url), "utf8"), readFile(new URL("../js/ui/dashboard.js", import.meta.url), "utf8"), readFile(new URL("../js/main.js", import.meta.url), "utf8"), readFile(new URL("../styles.css", import.meta.url), "utf8"),
 ]);
 
-test("mercado mantém Google Shopping opcional e distingue regras de referência", () => {
+test("mercado inicia com textos neutros e preserva as regras de referência", () => {
   assert.match(html, /Pesquisa de preços/);
   assert.match(html, /Preço médio de produtos equivalentes dos concorrentes/);
   assert.match(html, /Produto individual selecionado/);
-  assert.match(html, /Média da pesquisa Google Shopping/);
-  assert.match(html, /Mediana da pesquisa Google Shopping/);
-  assert.match(html, /Dados via Google Shopping/);
+  assert.match(html, /Média da pesquisa de mercado/);
+  assert.match(html, /Mediana da pesquisa de mercado/);
+  assert.match(html, /Dados de mercado/);
+  assert.doesNotMatch(html, /Google Shopping/);
   assert.match(dashboard, /Loja:/);
-  assert.match(dashboard, /Ver no Google Shopping/);
+  assert.match(dashboard, /Ver na loja/);
+  assert.match(dashboard, /Dados do catálogo de mercado/);
   assert.match(dashboard, /Mercado é opcional/);
   assert.match(main, /saveMarketReference\(window\.sessionStorage/);
   assert.match(styles, /\.market-error-alert/);
@@ -33,7 +35,8 @@ test("resultados de mercado pertencem ao dashboard e não à sidebar", () => {
   assert.equal((html.match(/id="marketPanel"/g) || []).length, 1);
   assert.match(html, /Escolha o produto que mais se aproxima/);
   assert.match(dashboard, /Buscando produtos no mercado/);
-  assert.match(dashboard, /Não encontramos referências suficientes para esta pesquisa/);
+  assert.match(dashboard, /Nenhum produto encontrado para/);
+  assert.match(dashboard, /Informar preço manualmente/);
   assert.match(dashboard, /Usar como referência/);
   assert.match(styles, /market-dashboard-section \.market-stats[\s\S]*grid-template-columns:\s*repeat\(5,/);
   assert.match(styles, /grid-template-columns:\s*repeat\(3,/);
@@ -45,4 +48,5 @@ test("renderização do dashboard reutiliza o state sem disparar nova consulta",
   assert.match(main, /marketSearchButton.*addEventListener\("click", searchMarket\)/s);
   assert.match(html, /id="marketRefreshButton"[^>]*>Atualizar resultados/);
   assert.match(html, /id="marketConsultedAt"/);
+  assert.match(main, /api\.get\("\/health"/);
 });
