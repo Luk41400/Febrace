@@ -1,6 +1,6 @@
 # Pesquisa de mercado com DataForSEO Merchant Google Shopping
 
-O navegador continua chamando somente a rota autenticada `GET /market/search?q=...`. O backend cria e consulta uma task da DataForSEO e devolve o mesmo contrato usado pelos cards, seleção de referência, histórico e ranking. O navegador não recebe o ID da task nem as credenciais.
+Com `MARKET_PROVIDER=dataforseo` (padrão), o navegador continua chamando somente a rota autenticada `GET /market/search?q=...`. O backend cria e consulta uma task da DataForSEO e devolve o mesmo contrato usado pelos cards, seleção de referência, histórico e ranking. O navegador não recebe o ID da task nem as credenciais. Para o modo local sem chamadas externas, consulte [postgres-market.md](postgres-market.md).
 
 ## Endpoints e escolha
 

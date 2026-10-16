@@ -128,7 +128,7 @@ Navegador: index.html + styles.css + ai-assistant.css + app.js
             |
             +-- Sessões, autenticação e produtos --> PostgreSQL
             +-- Salvamento --> o mesmo motor financeiro --> snapshot JSONB
-            +-- /market/search --> DataForSEO / Google Shopping
+            +-- /market/search --> DataForSEO ou catálogo PostgreSQL (MARKET_PROVIDER)
             +-- /fiscal/ncms/... --> Focus NFe
             +-- /tax/estimate --> CSV IBPT local
             +-- /ai/parse-pricing --> provedor IA --> validação --> patch
@@ -181,6 +181,7 @@ O cálculo da simulação acontece no navegador para atualizar a interface imedi
 | [lib/pricing-persistence.js](lib/pricing-persistence.js) | Recalcula a partir das entradas e produz o snapshot financeiro para salvar. |
 | [lib/market-search.js](lib/market-search.js) | Orquestra a pesquisa de mercado e seu contrato de resposta. |
 | [lib/dataforseo-market-provider.js](lib/dataforseo-market-provider.js) | Cliente externo de Google Shopping, normalização, cache e tratamento de falhas. |
+| [lib/postgres-market-provider.js](lib/postgres-market-provider.js) | Pesquisa no catálogo próprio PostgreSQL, contrato de mercado e cache local. |
 | [lib/focus-nfe-client.js](lib/focus-nfe-client.js) | Cliente autenticado de NCM da Focus NFe e tratamento seguro de respostas. |
 | [lib/fiscal-classification.js](lib/fiscal-classification.js) | Busca de candidatos, confirmação e vínculo da classificação à sessão. |
 | [lib/ibpt-tax-provider.js](lib/ibpt-tax-provider.js) | Carregamento e consulta exata da tabela IBPT local. |
@@ -192,7 +193,7 @@ O cálculo da simulação acontece no navegador para atualizar a interface imedi
 | [scripts/](scripts/) | Build, lint, migrations e verificações explícitas das integrações. |
 | [tests/](tests/) | Testes de domínio, contrato, UI, providers, persistência e fluxos. |
 | [data/ibpt/](data/ibpt/) | Arquivo de referência tributária utilizado pelo provider local. |
-| [docs/](docs/) | Guias específicos de IA, DataForSEO, Focus NFe e IBPT. |
+| [docs/](docs/) | Guias específicos de IA, mercado PostgreSQL, DataForSEO, Focus NFe e IBPT. |
 | [vercel.json](vercel.json) | Build e inclusão explícita do HTML e CSV IBPT na Function Express da Vercel. |
 | [docker-compose.yml](docker-compose.yml) | Banco PostgreSQL para desenvolvimento local; a aplicação Node é iniciada separadamente. |
 | [.env.example](.env.example) | Nomes de variáveis e exemplos sem credenciais reais. |
@@ -406,6 +407,12 @@ Defina `FOCUS_NFE_TOKEN` somente no ambiente do processo. Em desenvolvimento, a 
 
 O assistente usa a Focus NFe apenas para consultar e validar a descrição de um NCM exato. Ela não é apresentada como origem do cálculo tributário. Consulte [docs/focus-nfe.md](docs/focus-nfe.md) para os limites dessa validação.
 
+### Catálogo PostgreSQL de teste
+
+`MARKET_PROVIDER=postgres` faz `GET /market/search` consultar a tabela `market_catalog` no PostgreSQL existente. Não exige `DATAFORSEO_LOGIN` nem `DATAFORSEO_PASSWORD` e não chama DataForSEO. O padrão continua sendo `MARKET_PROVIDER=dataforseo`, preservando a integração atual. A seleção ocorre apenas no backend; a interface e o contrato de resposta são os mesmos. `/health` informa `provider: "PostgreSQL Catalog"`, `configured: true` e uma contagem de produtos armazenada em cache por um minuto.
+
+Para experimentar em desenvolvimento/teste, configure `DATABASE_URL` e `SESSION_SECRET`, execute `pnpm migrate`, depois `pnpm market:seed` e inicie com `MARKET_PROVIDER=postgres`. O seed recusa `NODE_ENV=production` e, por padrão, conexões fora de localhost ou do serviço `database` do Docker Compose. Um Neon de teste isolado e com catálogo vazio pode ser usado com `MARKET_SEED_ALLOW_NEON_TEST=1` apenas no comando do seed. Ele insere 28 produtos **inteiramente fictícios** com URLs `example.com`; esses preços não representam lojas ou ofertas reais. Não execute o seed em banco de produção. Consulte [docs/postgres-market.md](docs/postgres-market.md) para consultas de exemplo, limitações e estrutura da tabela.
+
 ### DataForSEO / Google Shopping
 
 A pesquisa usa o endpoint Merchant Google Shopping Products da DataForSEO. O navegador continua chamando somente `GET /market/search`; o backend cria uma task de alta prioridade, aguarda sua conclusão por polling e devolve os produtos no contrato atual. O backend usa HTTP Basic, normaliza preços BRL, mantém cache de cinco minutos e deduplica chamadas simultâneas. Os cards, a seleção de referência e o ranking permanecem iguais.
@@ -458,6 +465,7 @@ A referência editável é [.env.example](.env.example), e a interpretação efe
 | `FOCUS_NFE_TOKEN` | Credencial de consulta NCM | Somente backend; precisa corresponder ao ambiente escolhido. |
 | `FOCUS_NFE_BASE_URL` | Ambiente oficial da Focus | Opcional; a configuração aceita apenas as origens oficiais previstas no código. |
 | `FOCUS_NFE_TIMEOUT_MS` | Timeout da Focus | Padrão `5000`; inteiro entre 100 e 30000. |
+| `MARKET_PROVIDER` | Provider de pesquisa de mercado | `dataforseo` (padrão) ou `postgres` para teste local. |
 | `DATAFORSEO_LOGIN` | Login da área API Access | Somente backend; sem ele, a alternativa manual de mercado continua disponível. |
 | `DATAFORSEO_PASSWORD` | Senha da área API Access | Somente backend; não é exposta no navegador ou no health. |
 | `DATAFORSEO_TIMEOUT_MS` | Timeout de cada requisição HTTP à DataForSEO | Padrão `15000`; inteiro entre 100 e 30000. |
@@ -534,6 +542,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 pnpm start       # inicia o servidor em http://localhost:3000
 pnpm dev         # reinicia o servidor ao alterar arquivos
 pnpm migrate     # aplica migrations/*.sql pendentes
+pnpm market:seed # insere 28 produtos fictícios somente em PostgreSQL local de desenvolvimento
 pnpm lint        # verifica a sintaxe dos arquivos JavaScript
 pnpm build       # gera app.js a partir dos módulos em js/
 pnpm test        # executa os testes
@@ -552,6 +561,8 @@ Os equivalentes via npm são `npm run lint`, `npm test`, `npm run build`, `npm r
 - `users`: usuário, e-mail único, `password_hash` e timestamps; nome, e-mail e hash existentes atendem às configurações do perfil sem nova migration;
 - `products`: dados de precificação, `user_id`, cálculo completo e timestamps;
 - `user_sessions`: sessões do Express armazenadas no PostgreSQL.
+
+`migrations/002_market_catalog.sql` cria o catálogo opcional de mercado e seu índice GIN de busca textual. As migrations continuam manuais; o build e o start não as aplicam automaticamente.
 
 O relacionamento `products.user_id → users.id` usa chave estrangeira com `ON DELETE CASCADE`. Os índices `products(user_id, consultation_date DESC)` e `products(user_id, name)` deixam rápidas as consultas privadas do histórico.
 
@@ -594,7 +605,7 @@ Um banco local recém-criado começa vazio. Dados de produção não fazem parte
 | GET | `/products/:id` | Obrigatória + dono |
 | GET | `/fiscal/ncms/:codigo` | Obrigatória; proxy backend para Focus NFe |
 | GET | `/fiscal/ncms/search?q=descricao` | Obrigatória; sugestões fiscais por descrição da Focus NFe, sem confirmação automática |
-| GET | `/market/search?q=termos` | Obrigatória; proxy backend para DataForSEO Google Shopping |
+| GET | `/market/search?q=termos` | Obrigatória; usa DataForSEO ou o catálogo PostgreSQL conforme `MARKET_PROVIDER` |
 | POST | `/ai/parse-pricing` | Obrigatória; extrai e valida campos para prévia, sem calcular preço |
 | POST | `/tax/estimate` | Obrigatória; estima localmente a carga IBPT sobre o maior preço informado pelo state |
 | POST | `/products` | Obrigatória |

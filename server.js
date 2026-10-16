@@ -6,12 +6,13 @@ import express from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { rateLimit } from "express-rate-limit";
-import { getConfig, getFocusNfeConfig, getDataForSeoConfig, getAiAssistantConfig, aiAssistantHealth, deploymentHealth, marketHealth } from "./lib/config.js";
+import { getConfig, getFocusNfeConfig, getMarketConfig, getAiAssistantConfig, aiAssistantHealth, deploymentHealth, marketHealth } from "./lib/config.js";
 import { createAiFormProvider } from "./lib/ai-form-assistant.js";
 import { createAiPricingRouter, handleAiRequestError } from "./lib/ai-pricing-route.js";
 import { pool } from "./lib/database.js";
 import { runMarketSearch } from "./lib/market-search.js";
-import { createDataForSeoMarketProvider, marketProviderErrorForClient, MarketProviderError, redactMarketProviderSensitiveData } from "./lib/dataforseo-market-provider.js";
+import { createMarketProvider } from "./lib/market-provider.js";
+import { marketProviderErrorForClient, MarketProviderError, redactMarketProviderSensitiveData } from "./lib/dataforseo-market-provider.js";
 import { createFocusNFeClient, focusNFeErrorForClient, FocusNFeError, redactFocusNFeSensitiveData } from "./lib/focus-nfe-client.js";
 import { createIbptTaxProvider, ibptErrorForClient, IbptTaxError } from "./lib/ibpt-tax-provider.js";
 import { searchFiscalNcms, confirmFiscalNcm, hasRelevantFiscalConfirmation } from "./lib/fiscal-classification.js";
@@ -27,8 +28,8 @@ const config = getConfig();
 const focusNfeConfig = getFocusNfeConfig();
 const focusNfeClient = focusNfeConfig.isConfigured ? createFocusNFeClient(focusNfeConfig) : null;
 const taxProvider = createIbptTaxProvider({ filePath: resolve(projectRoot, "data", "ibpt", "TabelaIBPTaxSP26.2.A.csv") });
-const dataForSeoConfig = getDataForSeoConfig();
-const marketProvider = dataForSeoConfig.isConfigured ? createDataForSeoMarketProvider(dataForSeoConfig) : null;
+const marketConfig = getMarketConfig();
+const marketProvider = createMarketProvider(marketConfig, { pool });
 const aiConfig = getAiAssistantConfig();
 const aiProvider = createAiFormProvider(aiConfig);
 const app = express();
@@ -38,10 +39,10 @@ console.info("[AI] Configuration", aiAssistantHealth(aiConfig));
 console.info("[Deploy] Configuration", deploymentHealth());
 
 console.info(`[Fiscal/NCM] provider=FocusNFe configured=${focusNfeConfig.isConfigured} environment=${focusNfeConfig.environment}`);
-console.info("[Market] Provider: DataForSEO Google Shopping");
-console.info(`[Market] Configured: ${dataForSeoConfig.isConfigured}`);
-if (!dataForSeoConfig.isConfigured) {
-  console.warn(`[Market] Missing environment variables: ${dataForSeoConfig.missingEnvironmentVariables.join(", ")}`);
+console.info(`[Market] Provider: ${marketConfig.provider} ${marketConfig.marketplace}`);
+console.info(`[Market] Configured: ${marketConfig.isConfigured}`);
+if (!marketConfig.isConfigured) {
+  console.warn(`[Market] Missing environment variables: ${marketConfig.missingEnvironmentVariables.join(", ")}`);
 }
 
 app.disable("x-powered-by");
@@ -268,7 +269,10 @@ app.get("/health", async (req, res, next) => {
         environment: focusNfeConfig.environment,
         provider: "FocusNFe",
       },
-      market: marketHealth(dataForSeoConfig),
+      market: {
+        ...marketHealth(marketConfig),
+        ...(marketConfig.type === "postgres" ? { catalogProducts: await marketProvider.countProducts() } : {}),
+      },
       ai: aiAssistantHealth(aiConfig),
       deployment: deploymentHealth(),
       taxEstimate: taxProvider.health(),
@@ -286,7 +290,7 @@ app.get("/market/search", requireAuth, marketSearchLimiter, limitMarketRefresh, 
   res.once("close", cancelOnClose);
   try {
     const { q, refresh } = validate(marketSearchSchema, req.query, { code: "INVALID_MARKET_QUERY" });
-    const result = await runMarketSearch({ provider: marketProvider, config: dataForSeoConfig, query: q, refresh: refresh === "1", signal: controller.signal });
+    const result = await runMarketSearch({ provider: marketProvider, config: marketConfig, query: q, refresh: refresh === "1", signal: controller.signal });
     if (controller.signal.aborted) return;
     return res.json(result);
   } catch (error) {
@@ -502,7 +506,7 @@ app.use((error, req, res, next) => {
   const safeLogMessage = error instanceof FocusNFeError
     ? redactFocusNFeSensitiveData(error.message, [focusNfeConfig.token])
     : error instanceof MarketProviderError
-      ? redactMarketProviderSensitiveData(error.message, [dataForSeoConfig.login, dataForSeoConfig.password])
+      ? redactMarketProviderSensitiveData(error.message, [marketConfig.login, marketConfig.password])
       : "details omitted";
   console.error(`[api] ${req.method} ${req.path} falhou (${error.code || "UNKNOWN"}):`, safeLogMessage);
   if (res.headersSent) return next(error);
